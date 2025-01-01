@@ -11,8 +11,12 @@ toml==0.10.2
 tqdm==4.67.1
 transformers==4.46.3
 voluptuous==0.15.2
+gradio
 
 # optional dependencies
-# ascii-magic==2.3.0
-# matplotlib==3.10.0
-# tensorboard
+ascii-magic==2.3.0
+matplotlib==3.10.0
+tensorboard
+moviepy==1.0.3
+sageattention==1.0.6
+
