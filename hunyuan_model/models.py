@@ -733,7 +733,7 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
         max_seqlen_q = img_seq_len + txt_seq_len
         max_seqlen_kv = max_seqlen_q
 
-        attn_mask = None
+        attn_mask = total_len = None
         if self.attn_mode == "torch":
             # initialize attention mask: bool tensor for sdpa, (b, 1, n, n)
             bs = img.shape[0]
@@ -746,6 +746,8 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
             # set attention mask
             for i in range(bs):
                 attn_mask[i, :, : total_len[i], : total_len[i]] = True
+        elif self.attn_mode == "xformers":
+            total_len = text_mask.sum(dim=1) + img_seq_len  # (bs, )
 
         freqs_cis = (freqs_cos, freqs_sin) if freqs_cos is not None else None
         # --------------------- Pass through DiT blocks ------------------------
@@ -754,7 +756,7 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
                 img,
                 txt,
                 vec,
-                attn_mask,
+                attn_mask if attn_mask is not None else total_len,  # total_len for xformers
                 cu_seqlens_q,
                 cu_seqlens_kv,
                 max_seqlen_q,
@@ -783,7 +785,7 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
                     x,
                     vec,
                     txt_seq_len,
-                    attn_mask,
+                    attn_mask if attn_mask is not None else total_len,  # total_len for xformers
                     cu_seqlens_q,
                     cu_seqlens_kv,
                     max_seqlen_q,
@@ -943,7 +945,7 @@ def load_transformer(dit_path, attn_mode, device, dtype) -> HYVideoDiffusionTran
                 tensor = f.get_tensor(k)
                 tensor = tensor.to(device=device, dtype=dtype)
                 # TODO support comfy model
-                # if k.startswith("model.model."):  
+                # if k.startswith("model.model."):
                 #     k = convert_comfy_model_key(k)
                 state_dict[k] = tensor
         transformer.load_state_dict(state_dict, strict=True, assign=True)

@@ -962,9 +962,11 @@ class NetworkTrainer:
             attn_mode = "flash"
         elif args.sage_attn:
             attn_mode = "sageattn"
+        elif args.xformers:
+            attn_mode = "xformers"
         else:
             raise ValueError(
-                f"either --sdpa or --flash-attn or --sage-attn must be specified / --sdpaか--flash-attnか--sage-attnのいずれかを指定してください"
+                f"either --sdpa, --flash-attn, --sage-attn or --xformers must be specified / --sdpa, --flash-attn, --sage-attn, --xformersのいずれかを指定してください"
             )
         transformer = load_transformer(args.dit, attn_mode, loading_device, dit_weight_dtype)
         transformer.eval()
@@ -1583,6 +1585,11 @@ def setup_parser() -> argparse.ArgumentParser:
         "--sage_attn",
         action="store_true",
         help="use SageAttention. requires SageAttention / SageAttentionを使う。SageAttentionが必要",
+    )
+    parser.add_argument(
+        "--xformers",
+        action="store_true",
+        help="use xformers for CrossAttention, requires xformers / CrossAttentionにxformersを使う、xformersが必要",
     )
     parser.add_argument("--max_train_steps", type=int, default=1600, help="training steps / 学習ステップ数")
     parser.add_argument(

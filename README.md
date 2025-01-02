@@ -166,7 +166,9 @@ Specify `other` for `--target`. Use `default` to convert from another format to 
 
 ### SageAttention Installation
 
-For reference, here are basic steps for installing SageAttention. You may need to update Microsoft Visual C++ Redistributable to the latest version.
+sdbsd has provided a Windows-compatible SageAttention implementation and pre-built wheels here:  https://github.com/sdbds/SageAttention-for-windows. After installing triton, if your Python, PyTorch, and CUDA versions match, you can download and install the pre-built wheel from the [Releases](https://github.com/sdbds/SageAttention-for-windows/releases) page. Thanks to sdbsd for this contribution.
+
+For reference, the build and installation instructions are as follows. You may need to update Microsoft Visual C++ Redistributable to the latest version.
 
 1. Download and install triton 3.1.0 wheel matching your Python version from [here](https://github.com/woct0rdho/triton-windows/releases/tag/v3.1.0-windows.post5).
 
@@ -176,6 +178,8 @@ For reference, here are basic steps for installing SageAttention. You may need t
     ```shell
     git clone https://github.com/thu-ml/SageAttention.git
     ```
+
+    You can skip step 4 by using the sdbsd repository mentioned above by `git clone https://github.com/sdbds/SageAttention-for-windows.git`.
 
 4. Open `math.cuh` in the `SageAttention/csrc` folder and change `ushort` to `unsigned short` on lines 71 and 146, then save.
 

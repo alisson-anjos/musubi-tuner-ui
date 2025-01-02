@@ -343,7 +343,7 @@ def parse_args():
         "--device", type=str, default=None, help="device to use for inference. If None, use CUDA if available, otherwise use CPU"
     )
     parser.add_argument(
-        "--attn_mode", type=str, default="torch", choices=["flash", "torch", "sageattn", "sdpa"], help="attention mode"
+        "--attn_mode", type=str, default="torch", choices=["flash", "torch", "sageattn", "xformers", "sdpa"], help="attention mode"
     )
     parser.add_argument("--vae_chunk_size", type=int, default=None, help="chunk size for CausalConv3d in VAE")
     parser.add_argument(

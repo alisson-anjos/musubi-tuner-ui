@@ -20,8 +20,15 @@ try:
 
     print("Successfully imported sageattention")
 except ImportError:
-    print(f"Failed to import flash_attn and sageattention")
+    print(f"Failed to import sageattention")
     sageattn_varlen = None
+
+try:
+    import xformers.ops as xops
+    from xformers.ops import fmha
+except ImportError:
+    xops = None
+    fmha = None
 
 MEMORY_LAYOUT = {
     "flash": (
@@ -35,6 +42,10 @@ MEMORY_LAYOUT = {
     "torch": (
         lambda x: x.transpose(1, 2),
         lambda x: x.transpose(1, 2),
+    ),
+    "xformers": (
+        lambda x: x,
+        lambda x: x,
     ),
     "vanilla": (
         lambda x: x.transpose(1, 2),
@@ -119,6 +130,22 @@ def attention(
             q_or_qkv_list.clear()
         del q, k, v
         del attn_mask
+    elif mode == "xformers":
+        total_len = attn_mask  # reuse variable TODO change variable name
+
+        # B, M, H, K: M is the sequence length, H is the number of heads, K is the dimension of the heads -> it is same as input dimension
+        # currently only support batch_size = 1
+        assert q.shape[0] == 1, "Currently only support batch_size = 1"
+        seq_len = q.shape[1]
+        q = q[:, : total_len[0]]
+        k = k[:, : total_len[0]]
+        v = v[:, : total_len[0]]
+        x = xops.memory_efficient_attention(q, k, v, p=drop_rate)  # , causal=causal)
+        del q, k, v
+
+        # pad to the original sequence length
+        x = F.pad(x, (0, 0, 0, 0, 0, seq_len - x.shape[1]))
+
     elif mode == "flash":
         x = flash_attn_varlen_func(
             q,
