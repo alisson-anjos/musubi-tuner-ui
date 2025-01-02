@@ -31,7 +31,7 @@ Install the required dependencies using the following command:
 pip install -r requirements.txt
 ```
 
-Optionally, you can use FlashAttention and SageAttention (see [SageAttention Installation](#sageattention-installation) for installation instructions).
+Optionally, you can use FlashAttention and SageAttention (for inference only; see [SageAttention Installation](#sageattention-installation) for installation instructions).
 
 Additionally, install `ascii-magic` (used for dataset verification), `matplotlib` (used for timestep visualization), and `tensorboard` (used for logging training progress) as needed:
 
@@ -111,7 +111,7 @@ If you're running low on VRAM, use `--blocks_to_swap` to offload some blocks to 
 
 (The idea of block swap is based on the implementation by 2kpr. Thanks again to 2kpr.)
 
-Use `--sdpa` for PyTorch's scaled dot product attention, `--sage_attn` for SageAttention (note: training issues observed in testing, trained model may not work as expected), or `--flash_attn` for FlashAttention (untested).
+Use `--sdpa` for PyTorch's scaled dot product attention, or `--flash_attn` for FlashAttention (untested). `--sage_attn` uses SageAttention, but SageAttention is not yet supported for training and may not work correctly.
 
 Sample video generation is not yet implemented.
 
