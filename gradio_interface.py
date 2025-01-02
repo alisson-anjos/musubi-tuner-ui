@@ -488,9 +488,15 @@ def upload_dataset(files, current_dataset, action, dataset_name=None):
         dataset_dir = os.path.join(DATASET_DIR, dataset_name)
         if os.path.exists(dataset_dir):
             return current_dataset, f"Dataset '{dataset_name}' already exists. Please choose a different name.", []
+        
         os.makedirs(dataset_dir, exist_ok=True)
+        dataset_dir_images = os.path.join(dataset_dir, "images")
+        dataset_dir_videos = os.path.join(dataset_dir, "videos")
+        os.makedirs(dataset_dir_images, exist_ok=True)
+        os.makedirs(dataset_dir_videos, exist_ok=True)
+        
         return dataset_dir, f"Started new dataset: {dataset_dir}", show_media(dataset_dir)
-
+    
     if not current_dataset:
         return current_dataset, "Please start a new dataset before uploading files.", []
     
@@ -512,34 +518,145 @@ def upload_dataset(files, current_dataset, action, dataset_name=None):
 
     # Check if adding these files would exceed the limit
     if IS_CONTAINER and (total_size + new_files_size) > MAX_UPLOAD_SIZE_MB * 1024 * 1024:
-        return current_dataset, f"Upload would exceed the {MAX_UPLOAD_SIZE_MB}MB limit on Runpod. Please upload smaller files or finalize the dataset.", show_media(current_dataset)
+        return current_dataset, f"Upload would exceed the {MAX_UPLOAD_SIZE_MB}MB limit. Please upload smaller files or finalize the dataset.", show_media(current_dataset)
 
     uploaded_files = []
+    unsupported_files = []
+    
+    # Temporary storage for media and captions
+    media_files = []      # List of tuples: (file_object, destination_path)
+    caption_files = []    # List of tuples: (file_object, original_name)
+    extracted_files = []  # List of extracted file paths (for further processing)
 
     for file in files:
         file_path = file.name
         filename = os.path.basename(file_path)
-        dest_path = os.path.join(current_dataset, filename)
 
         if zipfile.is_zipfile(file_path):
             # If the file is a ZIP, extract its contents
             try:
                 with zipfile.ZipFile(file_path, 'r') as zip_ref:
-                    zip_ref.extractall(current_dataset)
+                    # Extract to a temporary directory within the current_dataset
+                    temp_extract_dir = os.path.join(current_dataset, "__temp_extract__")
+                    zip_ref.extractall(temp_extract_dir)
                 uploaded_files.append(f"{filename} (extracted)")
+                # Collect all extracted file paths for processing
+                for root, dirs, extracted in os.walk(temp_extract_dir):
+                    for extracted_file in extracted:
+                        extracted_file_path = os.path.join(root, extracted_file)
+                        extracted_files.append(extracted_file_path)
             except zipfile.BadZipFile:
                 uploaded_files.append(f"{filename} (invalid ZIP)")
                 continue
         else:
-            # Check if the file is a supported format
-            if filename.lower().endswith(('.mp4', '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.txt')):
-                shutil.copy(file_path, dest_path)
+            # Categorize files based on their extensions
+            lower_filename = filename.lower()
+            if lower_filename.endswith(('.jpg', '.jpeg', '.png', '.bmp', '.webp', '.mp4')):
+                # Determine the destination directory
+                if lower_filename.endswith('.mp4'):
+                    dest_dir = os.path.join(current_dataset, "videos")
+                else:
+                    dest_dir = os.path.join(current_dataset, "images")
+                
+                dest_path = os.path.join(dest_dir, filename)
+                media_files.append((file, dest_path))
                 uploaded_files.append(filename)
+            elif lower_filename.endswith('.txt'):
+                # Store caption files for later processing
+                caption_files.append((file, filename))
             else:
-                uploaded_files.append(f"{filename} (unsupported format)")
-                continue
+                unsupported_files.append(filename)
+    
+    # Process extracted files from ZIP archives
+    for extracted_file_path in extracted_files:
+        extracted_filename = os.path.basename(extracted_file_path)
+        lower_filename = extracted_filename.lower()
 
+        if lower_filename.endswith(('.jpg', '.jpeg', '.png', '.bmp', '.webp', '.mp4')):
+            if lower_filename.endswith('.mp4'):
+                dest_dir = os.path.join(current_dataset, "videos")
+            else:
+                dest_dir = os.path.join(current_dataset, "images")
+            
+            dest_path = os.path.join(dest_dir, extracted_filename)
+            try:
+                shutil.move(extracted_file_path, dest_path)
+                uploaded_files.append(extracted_filename)
+            except Exception as e:
+                uploaded_files.append(f"{extracted_filename} (failed to upload: {e})")
+        elif lower_filename.endswith('.txt'):
+            caption_files.append((extracted_file_path, extracted_filename))
+        else:
+            # Unsupported file inside ZIP
+            uploaded_files.append(f"{extracted_filename} (unsupported format)")
+    
+    # Remove temporary extraction directory
+    temp_extract_dir = os.path.join(current_dataset, "__temp_extract__")
+    if os.path.exists(temp_extract_dir):
+        shutil.rmtree(temp_extract_dir)
+    
+    # Check upload size constraints for media files
+    if IS_CONTAINER:
+        new_media_size = 0
+        for _, dest_path in media_files:
+            new_media_size += os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
+        if (total_size + new_media_size) > MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+            return current_dataset, f"Upload would exceed the {MAX_UPLOAD_SIZE_MB}MB limit. Please upload smaller files or finalize the dataset.", show_media(current_dataset)
+    
+    # Upload media files
+    for file_obj, dest_path in media_files:
+        try:
+            shutil.copy(file_obj.name, dest_path)
+        except Exception as e:
+            uploaded_files.append(f"{os.path.basename(dest_path)} (failed to upload: {e})")
+    
+    # Upload caption files
+    for caption in caption_files:
+        if isinstance(caption[0], str):
+            # Extracted caption file from ZIP
+            caption_file_path, caption_filename = caption
+            source_path = caption_file_path
+        else:
+            # Uploaded caption file
+            file_obj, caption_filename = caption
+            source_path = file_obj.name
+        
+        base_name, _ = os.path.splitext(caption_filename)
+        # Search for a media file with the same base name in images and videos
+        matched_media_dir = None
+        for ext in ['.jpg', '.jpeg', '.png', '.bmp', '.webp', '.mp4']:
+            for media_dir in ["images", "videos"]:
+                media_path = os.path.join(current_dataset, media_dir, base_name + ext)
+                if os.path.exists(media_path):
+                    matched_media_dir = media_dir
+                    break
+            if matched_media_dir:
+                break
+        
+        if matched_media_dir:
+            dest_path = os.path.join(current_dataset, matched_media_dir, caption_filename)
+            try:
+                shutil.copy(source_path, dest_path)
+                uploaded_files.append(f"{caption_filename} (caption for {base_name})")
+            except Exception as e:
+                uploaded_files.append(f"{caption_filename} (failed to upload: {e})")
+        else:
+            # No matching media file found; handle as needed
+            uploaded_files.append(f"{caption_filename} (no matching media file found)")
+        
+        # If the caption file was extracted from ZIP, remove it after processing
+        if isinstance(caption[0], str):
+            try:
+                os.remove(caption_file_path)
+            except Exception:
+                pass
+    
+    # Handle unsupported files
+    for unsupported in unsupported_files:
+        uploaded_files.append(f"{unsupported} (unsupported format)")
+    
     return current_dataset, f"Uploaded files: {', '.join(uploaded_files)}", show_media(current_dataset)
+
 
 def update_ui_with_config(config_values):
     """
@@ -721,19 +838,42 @@ def show_media(dataset_dir):
     if not dataset_dir or not os.path.exists(dataset_dir):
         # Return an empty list if the dataset_dir is invalid
         return []
+    
+    dataset_images = os.path.join(dataset_dir, "images")
+    dataset_videos = os.path.join(dataset_dir, "videos")
+    
+    # Supported file extensions
+    valid_extensions = ('.png', '.jpg', '.jpeg', '.bmp', '.webp', '.mp4')
+    
+    # Initialize lists for images and videos
+    image_files = []
+    video_files = []
+    
+    # Check if the images directory exists and list image files
+    if os.path.isdir(dataset_images):
+        image_files = [
+            os.path.join(dataset_images, f)
+            for f in os.listdir(dataset_images)
+            if f.lower().endswith(valid_extensions)
+        ]
+    
+    # Check if the videos directory exists and list video files
+    if os.path.isdir(dataset_videos):
+        video_files = [
+            os.path.join(dataset_videos, f)
+            for f in os.listdir(dataset_videos)
+            if f.lower().endswith(valid_extensions)
+        ]
 
-    # List of image and .mp4 video files
-    media_files = [
-        f for f in os.listdir(dataset_dir)
-        if f.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.mp4'))
-    ]
-
-    # Get absolute paths of the files
-    media_paths = [os.path.abspath(os.path.join(dataset_dir, f)) for f in media_files[:MAX_MEDIA]]
-
-    # Check if the files exist
+    # Combine image and video file paths
+    media_paths = image_files + video_files
+    
+    # Limit the number of media files if necessary
+    media_paths = media_paths[:MAX_MEDIA]
+    
+    # Filter out any paths that do not exist
     existing_media = [f for f in media_paths if os.path.exists(f)]
-
+    
     return existing_media
 
 def create_zip(dataset_name, download_dataset, download_config, download_outputs):
@@ -912,29 +1052,28 @@ def train(dit_path,
             dataset_path = os.path.join(DATASET_DIR, dataset_name)
             dataset_folder = Path(dataset_path)
             
+            dataset_images_path = os.path.join(dataset_path, "images")
+            dataset_videos_path = os.path.join(dataset_path, "videos")
+            
+            dataset_images_folder = Path(dataset_images_path)
+            dataset_videos_folder = Path(dataset_videos_path)
+            
             target_frames_error, target_frames_list = validate_target_frames(target_frames)
             if target_frames_error:
                 return target_frames_error, None
-            
-            IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
-            VIDEO_EXTENSIONS = {".mp4"}
             
             if not dataset_folder.is_dir():
                 print(f"The path {dataset_path} is not a valid directory.")
                 return
             
-            dataset_files = list(dataset_folder.iterdir())
+            dataset_images = list(dataset_images_folder.iterdir())
+            dataset_videos = list(dataset_videos_folder.iterdir())
             
             has_images = False
             has_videos = False
             
-            for file in dataset_files:
-                if file.is_file():
-                    extension = file.suffix.lower()
-                    if extension in IMAGE_EXTENSIONS:
-                        has_images = True
-                    elif extension in VIDEO_EXTENSIONS:
-                        has_videos = True
+            has_images = len(dataset_images) > 0
+            has_videos = len(dataset_videos) > 0
             
             datasets_configs = []
             
@@ -946,7 +1085,7 @@ def train(dit_path,
                 if (not general_resolutions_list or len(general_resolutions_list) != 2) and (not image_resolutions_list or len(image_resolutions_list) != 2):
                     return "Error: Please provide general resolutions or image resolutions in the format: [Width, Height]", None
                 
-                datasets_configs.append(ImageDataset(image_directory=dataset_path, resolution=image_resolutions_list, batch_size=image_batch_size, enable_bucket=image_enable_bucket, bucket_no_upscale=image_bucket_no_upscale))
+                datasets_configs.append(ImageDataset(image_directory=dataset_images_path, resolution=image_resolutions_list, batch_size=image_batch_size, enable_bucket=image_enable_bucket, bucket_no_upscale=image_bucket_no_upscale))
             
             if has_videos:
                 video_resolutions_error, video_resolutions_list = validate_resolutions(video_resolutions)
@@ -956,7 +1095,7 @@ def train(dit_path,
                 if (not general_resolutions_list or len(general_resolutions_list) != 2) and (not video_resolutions_list or len(video_resolutions_list) != 2):
                     return "Error: Please provide general resolutions or video resolutions in the format: [Width, Height]", None
                 
-                datasets_configs.append(VideoDataset(video_directory=dataset_path, resolution=video_resolutions_list, batch_size=video_batch_size, target_frames=target_frames_list, frame_extraction=frame_extraction, frame_stride=frame_stride, frame_sample=frame_sample, enable_bucket=video_enable_bucket, bucket_no_upscale=video_bucket_no_upscale))
+                datasets_configs.append(VideoDataset(video_directory=dataset_videos_path, resolution=video_resolutions_list, batch_size=video_batch_size, target_frames=target_frames_list, frame_extraction=frame_extraction, frame_stride=frame_stride, frame_sample=frame_sample, enable_bucket=video_enable_bucket, bucket_no_upscale=video_bucket_no_upscale))
                 
             config = DatasetConfig(general_config, datasets_configs)
             
@@ -1421,7 +1560,7 @@ with gr.Blocks(theme=theme) as demo:
         with gr.Row():
             attention = gr.Dropdown(
                 label="Attention",
-                choices=['sdpa', 'sage_attn', 'flash_attn'],
+                choices=['sdpa', 'sage_attn', 'flash_attn', 'xformers'],
                 value="sdpa",
                 info=""
             )

@@ -239,7 +239,7 @@ class TrainingConfig:
             f"hv_train_network.py",
             f"--dit {self.dit_path}",
             f"--dataset_config {self.dataset_config}",
-            "--sdpa" if self.attention == "sdpa" else "--sage_attn" if self.attention == "sage_attn" else "--flash_attn" if self.attention == "flash_attn" else "--sdpa",
+            "--sdpa" if self.attention == "sdpa" else "--sage_attn" if self.attention == "sage_attn" else "--flash_attn" if self.attention == "flash_attn" else "--xformers" if self.attention == "xformers" else "--sdpa",
             "--fp8_base" if self.fp8_base else "",
             f"--optimizer_type {self.optimizer_type}",
             f"--learning_rate {self.learning_rate}",
