@@ -86,10 +86,10 @@ EXPOSE 8888
 EXPOSE 6006 
 
 # Debug
-RUN $CONDA_DIR/bin/conda run -n pyenv \
-    pip install debugpy
+# RUN $CONDA_DIR/bin/conda run -n pyenv \
+#     pip install debugpy
 
-EXPOSE 5678
+# EXPOSE 5678
 
 # Copy the entire project
 COPY --chmod=755 . /musubi-tuner

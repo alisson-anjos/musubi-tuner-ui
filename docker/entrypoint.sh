@@ -86,10 +86,10 @@ cd /workspace/musubi-tuner
 
 # Use conda python instead of system python
 echo "Starting Gradio interface..."
-# python gradio_interface.py &
+python gradio_interface.py &
 
 # Use debugpy for debugging
-exec python -m debugpy --wait-for-client --listen 0.0.0.0:5678 gradio_interface.py
+# exec python -m debugpy --wait-for-client --listen 0.0.0.0:5678 gradio_interface.py
 
 echo "Starting Tensorboard interface..."
 $CONDA_DIR/bin/conda run -n pyenv tensorboard --logdir_spec=/workspace/outputs --bind_all --port 6006 &
