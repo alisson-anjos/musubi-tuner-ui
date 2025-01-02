@@ -31,7 +31,7 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
 ```
 
-オプションとして、FlashAttention、SageAttention（インストール方法は[こちら](#SagaAttentionのインストール方法)を参照）を使用できます。
+オプションとして、FlashAttention、SageAttention（推論にのみ使用、インストール方法は[こちら](#SagaAttentionのインストール方法)を参照）を使用できます。
 
 また、`ascii-magic`（データセットの確認に使用）、`matplotlib`（timestepsの可視化に使用）、`tensorboard`（学習ログの記録に使用）を必要に応じてインストールしてください。
 
@@ -111,7 +111,7 @@ VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブ�
 
 （block swapのアイデアは2kpr氏の実装に基づくものです。2kpr氏にあらためて感謝します。）
 
-`--sdpa`でPyTorchのscaled dot product attentionを使用します。`--sage_attn`でSageAttentionを使用します（ただし確認した範囲では学習がうまくいかないようです）。`--flash_attn`でFlashAttentionを使用します（動作未確認です）。
+`--sdpa`でPyTorchのscaled dot product attentionを使用します。`--flash_attn`でFlashAttentionを使用します（動作未確認です）。`--sage_attn`でSageAttentionを使用しますが、SageAttentionは現時点では学習に未対応のため、正しく動作しません。
 
 サンプル動画生成は現時点では実装されていません。
 
