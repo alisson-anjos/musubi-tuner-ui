@@ -181,14 +181,17 @@ class TrainingConfig:
         dataset_config: str,
         output_dir: str,
         output_name: str,
+        log_dir: str = "./log",
         mixed_precision: str = "bf16",
         optimizer_type: str = "adamw8bit",
         learning_rate: float = 1e-3,
         gradient_checkpointing: bool = True,
+        gradient_accumulation_steps: int = 4,
         max_data_loader_n_workers: int = 2,
         persistent_data_loader_workers: bool = True,
         network_module: str = "networks.lora",
         network_dim: int = 32,
+        network_alpha: int = 16,
         timestep_sampling: str = "sigmoid",
         discrete_flow_shift: float = 1.0,
         max_train_epochs: int = 16,
@@ -196,6 +199,8 @@ class TrainingConfig:
         seed: int = 42,
         num_cpu_threads_per_process: int = 1,
         fp8_base: bool = True,
+        enable_lowvram: bool = False,
+        blocks_to_swap: int = 20,
         attention: str = "sdpa",
     ):
         self.dit_path = dit_path
@@ -209,18 +214,24 @@ class TrainingConfig:
         self.optimizer_type = optimizer_type
         self.learning_rate = learning_rate
         self.gradient_checkpointing = gradient_checkpointing
+        self.gradient_accumulation_steps = gradient_accumulation_steps
         self.max_data_loader_n_workers = max_data_loader_n_workers
         self.persistent_data_loader_workers = persistent_data_loader_workers
         self.network_module = network_module
         self.network_dim = network_dim
+        self.network_alpha = network_alpha
         self.timestep_sampling = timestep_sampling
         self.discrete_flow_shift = discrete_flow_shift
         self.max_train_epochs = max_train_epochs
         self.save_every_n_epochs = save_every_n_epochs
         self.seed = seed
+        self.log_dir = log_dir
         self.num_cpu_threads_per_process = num_cpu_threads_per_process
         self.fp8_base = fp8_base
+        self.enable_lowvram = enable_lowvram
+        self.blocks_to_swap = blocks_to_swap
         self.attention = attention
+
 
     def generate_command(self) -> str:
         
@@ -241,18 +252,23 @@ class TrainingConfig:
             f"--dataset_config {self.dataset_config}",
             "--sdpa" if self.attention == "sdpa" else "--sage_attn" if self.attention == "sage_attn" else "--flash_attn" if self.attention == "flash_attn" else "--xformers" if self.attention == "xformers" else "--sdpa",
             "--fp8_base" if self.fp8_base else "",
+            f"--blocks_to_swap {self.blocks_to_swap} --fp8_llm" if self.enable_lowvram else "",
             f"--optimizer_type {self.optimizer_type}",
             f"--learning_rate {self.learning_rate}",
             "--gradient_checkpointing" if self.gradient_checkpointing else "",
+            f"--gradient_accumulation_steps {self.gra}",
             f"--max_data_loader_n_workers {self.max_data_loader_n_workers}",
             "--persistent_data_loader_workers" if self.persistent_data_loader_workers else "",
             f"--network_module {self.network_module}",
             f"--network_dim {self.network_dim}",
+            f"--network_alpha {self.network_alpha}",
             f"--timestep_sampling {self.timestep_sampling}",
             f"--discrete_flow_shift {self.discrete_flow_shift}",
             f"--max_train_epochs {self.max_train_epochs}",
             f"--save_every_n_epochs {self.save_every_n_epochs}",
             f"--seed {self.seed}",
+            f"--logging_dir {self.log_dir}",
+            f"--log_with \"tensorboard\"",
             f"--output_dir {self.output_dir}",
             f"--output_name {self.output_name}",
         ]
@@ -273,10 +289,14 @@ class TrainingConfig:
           "gradient_checkpointing": self.gradient_checkpointing,
           "max_data_loader_n_workers": self.max_data_loader_n_workers,
           "persistent_data_loader_workers": self.persistent_data_loader_workers,
+          "network_module": self.network_module,
           "network_dim": self.network_dim,
+          "timestep_sampling": self.timestep_sampling,
+          "discrete_flow_shift": self.discrete_flow_shift,
           "max_train_epochs": self.max_train_epochs,
           "save_every_n_epochs": self.save_every_n_epochs,
           "seed": self.seed,
+          "num_cpu_threads_per_process": self.num_cpu_threads_per_process,
           "fp8_base": self.fp8_base,
           "attention": self.attention
       }

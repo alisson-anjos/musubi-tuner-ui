@@ -1008,6 +1008,7 @@ def train(dit_path,
             optimizer_type,
             learning_rate,
             gradient_checkpointing,
+            gradient_accumulation_steps,
             max_data_loader_n_workers,
             persistent_data_loader_workers,
             network_dim,
@@ -1015,6 +1016,8 @@ def train(dit_path,
             save_every_n_epochs,
             seed,
             fp8_base,
+            enable_lowvram,
+            blocks_to_swap,
             attention,
             general_batch_size,
             general_resolutions,
@@ -1109,17 +1112,24 @@ def train(dit_path,
                 dataset_config=f"{config_path}/dataset_config.toml",
                 output_dir=output_path,
                 output_name=dataset_name,
+                log_dir=f"{output_path}/logs",
                 mixed_precision=mixed_precision,
                 optimizer_type=optimizer_type,
                 learning_rate=learning_rate,
                 gradient_checkpointing=gradient_checkpointing,
+                gradient_accumulation_steps=gradient_accumulation_steps,
                 max_data_loader_n_workers=max_data_loader_n_workers,
                 persistent_data_loader_workers=persistent_data_loader_workers,
+                network_module="lora.networks",
                 network_dim=network_dim,
+                network_alpha=network_alpha,
                 max_train_epochs=max_train_epochs,
                 save_every_n_epochs=save_every_n_epochs,
                 seed=seed,
+                num_cpu_threads_per_process=1,
                 fp8_base=fp8_base,
+                enable_lowvram=enable_lowvram,
+                blocks_to_swap=blocks_to_swap,
                 attention=attention
             )
         
@@ -1423,6 +1433,11 @@ with gr.Blocks(theme=theme) as demo:
                 step=0.001,
                 info="Optimizer learning rate"
             )
+            gradient_accumulation_steps = gr.Number(
+                label="Gradient Accumulation Steps",
+                value=1,
+                info="Gradient Accumulation Steps"
+            )
             save_every = gr.Number(
                 label="Save Every N Epochs",
                 value=2,
@@ -1432,8 +1447,17 @@ with gr.Blocks(theme=theme) as demo:
             network_dim = gr.Number(
                 label="Network dim",
                 value=32,
-                info="Network dimension"
+                precision=0,
+                info="Network dimension (2-128)"
             )
+            
+            network_alpha = gr.Number(
+                label="Network alpha",
+                value=16,
+                precision=0,
+                info="Network alpha (2-128)"
+            )
+            
             mixed_precision_data_type = gr.Dropdown(
                 label="Mixed Precision Data Type",
                 choices=['fp32', 'fp16', 'bf16', 'fp8'],
@@ -1569,6 +1593,34 @@ with gr.Blocks(theme=theme) as demo:
                 value=True,
                 info="Without this flag, mixed precision data type will be used. fp8 can significantly reduce memory consumption but may impact output quality"
             )
+            enable_lowvram = gr.Checkbox(
+                label="Enable Low VRAM",
+                value=False,
+                info="VRAM: 12GB or more recommended for image training, 24GB or more recommended for video training (For 12GB, use a resolution of 960x544 or lower and use memory-saving enable this option)"
+            )
+            
+            blocks_to_swap = gr.Number(
+                label="Blocks to Swap",
+                value=20,
+                precision=0,
+                visible=False,
+                info="Number of blocks to swap (20-36)"
+            )
+            
+            def toggle_blocks_swap(checked):
+                return gr.update(visible=checked)
+
+            enable_lowvram.change(
+                toggle_blocks_swap,
+                inputs=enable_lowvram,
+                outputs=blocks_to_swap
+            )
+        
+            # block_swap = gr.Checkbox(
+            #     label="FP8 Base",
+            #     value=True,
+            #     info="Without this flag, mixed precision data type will be used. fp8 can significantly reduce memory consumption but may impact output quality"
+            # )
             gradient_checkpointing = gr.Checkbox(
                 label="Gradiente Checkpointing",
                 value=True,
@@ -1632,13 +1684,17 @@ with gr.Blocks(theme=theme) as demo:
                            optimizer_type,
                            learning_rate,
                            gradient_checkpointing,
+                           gradient_accumulation_steps,
                            max_data_loader_n_workers,
                            persistent_data_loader_workers,
                            network_dim,
+                           network_alpha,
                            max_train_epochs,
                            save_every_n_epochs,
                            seed,
                            fp8_base,
+                           enable_lowvram,
+                           blocks_to_swap,
                            attention,
                            general_batch_size,
                            general_resolutions,
@@ -1688,13 +1744,17 @@ with gr.Blocks(theme=theme) as demo:
             optimizer_type,
             learning_rate,
             gradient_checkpointing,
+            gradient_accumulation_steps,
             max_data_loader_n_workers,
             persistent_data_loader_workers,
             network_dim,
+            network_alpha,
             max_train_epochs,
             save_every_n_epochs,
             seed,
             fp8_base,
+            enable_lowvram,
+            blocks_to_swap,
             attention,
             general_batch_size,
             general_resolutions,
@@ -1744,9 +1804,9 @@ with gr.Blocks(theme=theme) as demo:
         fn=handle_train_click,
         inputs=[
             dit_path, vae_path, llm_path, clip_path, dataset_path, config_dir, output_dir, dataset_name_input,
-            mixed_precision_data_type, optimizer_type, lr, gradient_checkpointing, 
-            max_data_loader_n_workers, persistent_data_loader_workers, network_dim, 
-            max_train_epochs, save_every, seed, fp8_base, attention, general_batch_size, general_resolutions,
+            mixed_precision_data_type, optimizer_type, lr, gradient_checkpointing, gradient_accumulation_steps, 
+            max_data_loader_n_workers, persistent_data_loader_workers, network_dim, network_alpha,
+            max_train_epochs, save_every, seed, fp8_base, enable_lowvram, blocks_to_swap,attention, general_batch_size, general_resolutions,
             general_enable_bucket, general_bucket_no_upscale, image_resolutions, image_batch_size,
             image_enable_bucket, image_bucket_no_upscale, video_resolutions, video_batch_size, target_frames,
             frame_extraction, frame_stride, frame_sample, video_enable_bucket, video_bucket_no_upscale
