@@ -996,7 +996,9 @@ class NetworkTrainer:
                 accelerator.print(f"merging module: {weight_path} with multiplier {multiplier}")
 
                 weights_sd = load_file(weight_path)
-                module = network_module.create_network_from_weights_hunyuan_video(multiplier, weights_sd, unet=transformer)
+                module = network_module.create_network_from_weights_hunyuan_video(
+                    multiplier, weights_sd, unet=transformer, for_inference=True
+                )
                 module.merge_to(None, transformer, weights_sd, weight_dtype, "cpu")
 
             accelerator.print(f"all weights merged: {', '.join(args.base_weights)}")

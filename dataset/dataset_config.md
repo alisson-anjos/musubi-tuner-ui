@@ -4,6 +4,8 @@ Please create a TOML file for dataset configuration.
 
 Image and video datasets are supported. The configuration file can include multiple datasets, either image or video datasets, with caption text files or metadata JSONL files.
 
+The cache directory must be different for each dataset.
+
 ### Sample for Image Dataset with Caption Text Files
 
 ```toml
@@ -19,9 +21,12 @@ bucket_no_upscale = false
 
 [[datasets]]
 image_directory = "/path/to/image_dir"
+cache_directory = "/path/to/cache_directory"
 
 # other datasets can be added here. each dataset can have different configurations
 ```
+
+`cache_directory` is optional, default is None to use the same directory as the image directory. However, we recommend to set the cache directory to avoid accidental sharing of the cache files between different datasets.
 
 ### Sample for Image Dataset with Metadata JSONL File
 
@@ -39,7 +44,7 @@ bucket_no_upscale = false
 
 [[datasets]]
 image_jsonl_file = "/path/to/metadata.jsonl"
-cache_directory = "/path/to/cache_directory"
+cache_directory = "/path/to/cache_directory" # required for metadata jsonl file
 
 # other datasets can be added here. each dataset can have different configurations
 ```
@@ -66,6 +71,7 @@ bucket_no_upscale = false
 
 [[datasets]]
 video_directory = "/path/to/video_dir"
+cache_directory = "/path/to/cache_directory" # recommended to set cache directory
 target_frames = [1, 25, 45]
 frame_extraction = "head"
 
@@ -90,14 +96,14 @@ bucket_no_upscale = false
 video_jsonl_file = "/path/to/metadata.jsonl"
 target_frames = [1, 25, 45]
 frame_extraction = "head"
-cache_directory = "/path/to/cache_directory"
+cache_directory = "/path/to/cache_directory_head"
 
 # same metadata jsonl file can be used for multiple datasets
 [[datasets]]
 video_jsonl_file = "/path/to/metadata.jsonl"
 target_frames = [1]
 frame_stride = 10
-cache_directory = "/path/to/cache_directory"
+cache_directory = "/path/to/cache_directory_stride"
 
 # other datasets can be added here. each dataset can have different configurations
 ```
@@ -109,7 +115,7 @@ JSONL file format for metadata:
 {"video_path": "/path/to/video2.mp4", "caption": "A caption for video2"}
 ```
 
-### fame_extraction Options
+### frame_extraction Options
 
 - `head`: Extract the first N frames from the video.
 - `chunk`: Extract frames by splitting the video into chunks of N frames.

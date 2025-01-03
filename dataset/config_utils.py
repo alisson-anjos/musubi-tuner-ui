@@ -240,6 +240,15 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
         dataset = dataset_klass(**asdict(dataset_blueprint.params))
         datasets.append(dataset)
 
+    # assertion
+    cache_directories = [dataset.cache_directory for dataset in datasets]
+    num_of_unique_cache_directories = len(set(cache_directories))
+    if num_of_unique_cache_directories != len(cache_directories):
+        raise ValueError(
+            "cache directory should be unique for each dataset (note that cache directory is image/video directory if not specified)"
+            + " / cache directory は各データセットごとに異なる必要があります（指定されていない場合はimage/video directoryが使われるので注意）"
+        )
+
     # print info
     info = ""
     for i, dataset in enumerate(datasets):

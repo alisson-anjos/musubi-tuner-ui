@@ -24,12 +24,12 @@ import torch.nn as nn
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 
-try:
-    # This diffusers is modified and packed in the mirror.
-    from diffusers.loaders import FromOriginalVAEMixin
-except ImportError:
-    # Use this to be compatible with the original diffusers.
-    from diffusers.loaders.single_file_model import FromOriginalModelMixin as FromOriginalVAEMixin
+# try:
+#     # This diffusers is modified and packed in the mirror.
+#     from diffusers.loaders import FromOriginalVAEMixin
+# except ImportError:
+#     # Use this to be compatible with the original diffusers.
+#     from diffusers.loaders.single_file_model import FromOriginalModelMixin as FromOriginalVAEMixin
 from diffusers.utils.accelerate_utils import apply_forward_hook
 from diffusers.models.attention_processor import (
     ADDED_KV_ATTENTION_PROCESSORS,
@@ -50,7 +50,7 @@ class DecoderOutput2(BaseOutput):
     posterior: Optional[DiagonalGaussianDistribution] = None
 
 
-class AutoencoderKLCausal3D(ModelMixin, ConfigMixin, FromOriginalVAEMixin):
+class AutoencoderKLCausal3D(ModelMixin, ConfigMixin):
     r"""
     A VAE model with KL loss for encoding images/videos into latents and decoding latent representations into images/videos.
 

@@ -4,12 +4,19 @@
 
 This repository provides scripts for training LoRA (Low-Rank Adaptation) models with HunyuanVideo.
 
-__This repository is under development. Only image training has been verified.__
+__This repository is under development.__
+
+### Recent Updates
+
+- 03, Jan, 2025: The noise initialization method during inference has changed. When the same seed is specified, the common frames will be the same even if the number of generated frames is different. Please note that the inference results will be different from before even with the same seed.
+
+(For example, when 25 frames are specified, the time length of the latent is 7, and when 45 frames are specified, the time length of the latent is 12, but the first 7 frames of both will have the same noise value when the same seed is specified.)
 
 ### Hardware Requirements
 
-- VRAM: 24GB or more (May work with 12GB+ but this is unverified)
-- Main Memory: 64GB or more recommended
+- VRAM: 12GB or more recommended for image training, 24GB or more recommended for video training
+    - Depends on resolution, etc. For 12GB, use a resolution of 960x544 or lower and use memory-saving options such as `--blocks_to_swap`, `--fp8_llm`, etc.
+- Main Memory: 64GB or more recommended, 32GB + swap may work
 
 ### Features
 
@@ -105,7 +112,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 hv_trai
 
 For additional options, use `python hv_train_network.py --help` (note that many options are unverified).
 
-Specifying `--fp8_base` runs DiT in fp8 mode. Without this flag, mixed precision data type will be used. fp8 can significantly reduce memory consumption but may impact output quality.
+Specifying `--fp8_base` runs DiT in fp8 mode. Without this flag, mixed precision data type will be used. fp8 can significantly reduce memory consumption but may impact output quality. If `--fp8_base` is not specified, 24GB or more VRAM is recommended. Use `--blocks_to_swap` as needed.
 
 If you're running low on VRAM, use `--blocks_to_swap` to offload some blocks to CPU. Maximum value is 36.
 

@@ -25,6 +25,7 @@ from hunyuan_model.vae import load_vae
 from hunyuan_model.models import load_transformer, get_rotary_pos_embed
 from modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 from networks import lora
+from utils.model_utils import str_to_dtype
 
 import logging
 
@@ -268,7 +269,7 @@ def encode_input_prompt(prompt, args, device, fp8_llm=False, accelerator=None):
 
 
 def decode_latents(args, latents, device):
-    vae_dtype = torch.float16
+    vae_dtype = torch.float16 if args.vae_dtype is None else str_to_dtype(args.vae_dtype)
     vae, _, s_ratio, t_ratio = load_vae(vae_dtype=vae_dtype, device=device, vae_path=args.vae)
     vae.eval()
     # vae_kwargs = {"s_ratio": s_ratio, "t_ratio": t_ratio}
@@ -319,12 +320,13 @@ def parse_args():
 
     parser.add_argument("--dit", type=str, required=True, help="DiT checkpoint path or directory")
     parser.add_argument("--vae", type=str, required=True, help="VAE checkpoint path or directory")
+    parser.add_argument("--vae_dtype", type=str, default=None, help="data type for VAE, default is float16")
     parser.add_argument("--text_encoder1", type=str, required=True, help="Text Encoder 1 directory")
     parser.add_argument("--text_encoder2", type=str, required=True, help="Text Encoder 2 directory")
 
     # LoRA
-    parser.add_argument("--lora_weight", type=str, required=False, default=None, help="LoRA weight path")
-    parser.add_argument("--lora_multiplier", type=float, default=1.0, help="LoRA multiplier")
+    parser.add_argument("--lora_weight", type=str, nargs="*", required=False, default=None, help="LoRA weight path")
+    parser.add_argument("--lora_multiplier", type=float, nargs="*", default=1.0, help="LoRA multiplier")
 
     parser.add_argument("--prompt", type=str, required=True, help="prompt for generation")
     parser.add_argument("--video_size", type=int, nargs=2, default=[256, 256], help="video size")
@@ -416,15 +418,21 @@ def main():
         transformer.eval()
 
         # load LoRA weights
-        if args.lora_weight is not None:
-            logger.info(f"Loading LoRA weights from {args.lora_weight}")
-            weights_sd = load_file(args.lora_weight)
-            network = lora.create_network_from_weights_hunyuan_video(
-                args.lora_multiplier, weights_sd, unet=transformer, for_inference=True
-            )
-            logger.info("Merging LoRA weights to DiT model")
-            network.merge_to(None, transformer, weights_sd, device=device)
-            logger.info("LoRA weights loaded")
+        if args.lora_weight is not None and len(args.lora_weight) > 0:
+            for i, lora_weight in enumerate(args.lora_weight):
+                if args.lora_multiplier is not None and len(args.lora_multiplier) > i:
+                    lora_multiplier = args.lora_multiplier[i]
+                else:
+                    lora_multiplier = 1.0
+
+                logger.info(f"Loading LoRA weights from {lora_weight} with multiplier {lora_multiplier}")
+                weights_sd = load_file(lora_weight)
+                network = lora.create_network_from_weights_hunyuan_video(
+                    lora_multiplier, weights_sd, unet=transformer, for_inference=True
+                )
+                logger.info("Merging LoRA weights to DiT model")
+                network.merge_to(None, transformer, weights_sd, device=device)
+                logger.info("LoRA weights loaded")
 
         if blocks_to_swap > 0:
             logger.info(f"Casting model to {dit_weight_dtype}")
@@ -472,14 +480,22 @@ def main():
         else:
             latent_video_length = video_length
 
-        shape = (
-            num_videos_per_prompt,
-            num_channels_latents,
-            latent_video_length,
-            height // vae_scale_factor,
-            width // vae_scale_factor,
-        )
-        latents = randn_tensor(shape, generator=generator, device=device, dtype=dit_dtype)
+        # shape = (
+        #     num_videos_per_prompt,
+        #     num_channels_latents,
+        #     latent_video_length,
+        #     height // vae_scale_factor,
+        #     width // vae_scale_factor,
+        # )
+        # latents = randn_tensor(shape, generator=generator, device=device, dtype=dit_dtype)
+
+        # make first N frames to be the same
+        shape_or_frame = (num_videos_per_prompt, num_channels_latents, 1, height // vae_scale_factor, width // vae_scale_factor)
+        latents = []
+        for i in range(latent_video_length):
+            latents.append(randn_tensor(shape_or_frame, generator=generator, device=device, dtype=dit_dtype))
+        latents = torch.cat(latents, dim=2)
+
         # FlowMatchDiscreteScheduler does not have init_noise_sigma
 
         # Denoising loop
