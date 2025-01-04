@@ -318,132 +318,6 @@ def toggle_dataset_option(option):
             gr.update(visible=False),     # Hide Upload Files Button
         )
 
-# def train_model(dataset_path, config_dir, output_dir, epochs, batch_size, lr, save_every, eval_every, rank, dtype,
-#                 transformer_path, vae_path, llm_path, clip_path, optimizer_type, betas, weight_decay, eps,
-#                 gradient_accumulation_steps, num_repeats, resolutions, enable_ar_bucket, min_ar, max_ar, num_ar_buckets, frame_buckets, ar_buckets, gradient_clipping, warmup_steps, eval_before_first_step, eval_micro_batch_size_per_gpu, eval_gradient_accumulation_steps, checkpoint_every_n_minutes, activation_checkpointing, partition_method, save_dtype, caching_batch_size, steps_per_print, video_clip_mode, resume_from_checkpoint, only_double_blocks
-#                 ):
-#     try:
-#         # Validate inputs
-#         if not dataset_path or not os.path.exists(dataset_path) or dataset_path == BASE_DATASET_DIR:
-#             return "Error: Please provide a valid dataset path", None
-        
-#         os.makedirs(config_dir, exist_ok=True)
-
-#         if not config_dir or not os.path.exists(config_dir) or config_dir == CONFIG_DIR:
-#             return "Error: Please provide a valid config path", None
-
-#         os.makedirs(output_dir, exist_ok=True)
-        
-#         if not output_dir or not os.path.exists(output_dir) or output_dir == OUTPUT_DIR:
-#             return "Error: Please provide a valid output path", None
-        
-#         resolutions_error, resolutions_list = validate_resolutions(resolutions)
-#         if resolutions_error:
-#             return resolutions_error, None
-            
-#         try:
-#             frame_buckets_list = json.loads(frame_buckets)
-#             if not isinstance(frame_buckets_list, list) or not all(isinstance(b, int) for b in frame_buckets_list):
-#                 return "Error: Frame buckets must be a list of integers. Example: [1, 33, 65]", None
-#         except Exception as e:
-#             return f"Error parsing frame buckets: {str(e)}", None
-        
-#         ar_buckets_list = None
-        
-#         if len(ar_buckets) > 0:
-#             ar_buckets_error, ar_buckets_list = validate_ar_buckets(ar_buckets)
-#             if ar_buckets_error:
-#                 return ar_buckets_error, None
-
-#         # Create configurations
-#         dataset_config_path = create_dataset_config(
-#             dataset_path=dataset_path,
-#             config_dir=config_dir,
-#             num_repeats=num_repeats,
-#             resolutions=resolutions_list,
-#             enable_ar_bucket=enable_ar_bucket,
-#             min_ar=min_ar,
-#             max_ar=max_ar,
-#             num_ar_buckets=num_ar_buckets,
-#             frame_buckets=frame_buckets_list,
-#             ar_buckets=ar_buckets_list
-#         )
-        
-#         training_config_path, _ = create_training_config(
-#             output_dir=output_dir,
-#             config_dir=config_dir,
-#             dataset_config_path=dataset_config_path,
-#             epochs=epochs,
-#             batch_size=batch_size,
-#             lr=lr,
-#             save_every=save_every,
-#             eval_every=eval_every,
-#             rank=rank,
-#             only_double_blocks=only_double_blocks,
-#             dtype=dtype,
-#             transformer_path=transformer_path,
-#             vae_path=vae_path,
-#             llm_path=llm_path,
-#             clip_path=clip_path,
-#             optimizer_type=optimizer_type,
-#             betas=betas,
-#             weight_decay=weight_decay,
-#             eps=eps,
-#             gradient_accumulation_steps=gradient_accumulation_steps,
-#             gradient_clipping=gradient_clipping,
-#             warmup_steps=warmup_steps,
-#             eval_before_first_step=eval_before_first_step,
-#             eval_micro_batch_size_per_gpu=eval_micro_batch_size_per_gpu,
-#             eval_gradient_accumulation_steps=eval_gradient_accumulation_steps,
-#             checkpoint_every_n_minutes=checkpoint_every_n_minutes,
-#             activation_checkpointing=activation_checkpointing,
-#             partition_method=partition_method,
-#             save_dtype=save_dtype,
-#             caching_batch_size=caching_batch_size,
-#             steps_per_print=steps_per_print,
-#             video_clip_mode=video_clip_mode
-#         )
-
-#         conda_activate_path = "/opt/conda/etc/profile.d/conda.sh"
-#         conda_env_name = "pyenv"
-#         num_gpus = os.getenv("NUM_GPUS", "1")
-        
-#         if not os.path.isfile(conda_activate_path):
-#             return "Error: Conda activation script not found", None
-        
-#         resume_checkpoint =  "--resume_from_checkpoint" if resume_from_checkpoint else ""
-        
-#         cmd = (
-#             f"bash -c 'source {conda_activate_path} && "
-#             f"conda activate {conda_env_name} && "
-#             f"NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 deepspeed --num_gpus={num_gpus} "
-#             f"train.py --deepspeed --config {training_config_path} {resume_checkpoint}'"          
-#         )
-        
-#         # --regenerate_cache
-            
-#         proc = subprocess.Popen(
-#             cmd,
-#             shell=True,  # Required for complex shell commands
-#             stdout=subprocess.PIPE,
-#             stderr=subprocess.STDOUT,
-#             preexec_fn=os.setsid,
-#             universal_newlines=False  # To handle bytes
-#         )
-        
-#         with process_lock:
-#             process_dict[proc.pid] = proc  
-        
-#         thread = threading.Thread(target=read_subprocess_output, args=(proc, log_queue))
-#         thread.start()
-        
-#         pid = proc.pid
-        
-#         return "Training started! Logs will appear below.\n", pid
-
-#     except Exception as e:
-#         return f"Error during training: {str(e)}", None
-
 def stop_training(pid):
     if pid is None:
         return "No training process is currently running."
@@ -1012,6 +886,7 @@ def train(dit_path,
             max_data_loader_n_workers,
             persistent_data_loader_workers,
             network_dim,
+            network_alpha,
             max_train_epochs,
             save_every_n_epochs,
             seed,
@@ -1120,7 +995,7 @@ def train(dit_path,
                 gradient_accumulation_steps=gradient_accumulation_steps,
                 max_data_loader_n_workers=max_data_loader_n_workers,
                 persistent_data_loader_workers=persistent_data_loader_workers,
-                network_module="lora.networks",
+                network_module="networks.lora",
                 network_dim=network_dim,
                 network_alpha=network_alpha,
                 max_train_epochs=max_train_epochs,
@@ -1469,7 +1344,7 @@ with gr.Blocks(theme=theme) as demo:
         with gr.Row():
             general_resolutions = gr.Textbox(
                 label="General Resolutions",
-                value="",
+                value="[960, 544]",
                 info="[W, H], default is None. This is the default resolution for all datasets. Example: [512, 512]"
             )
              

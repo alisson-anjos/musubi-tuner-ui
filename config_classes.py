@@ -245,18 +245,19 @@ class TrainingConfig:
             f"--text_encoder1 {self.llm_path} "
             f"--text_encoder2 {self.clip_path} --batch_size 16 && "
             f"echo \"Running the training command...\" && "
-            f"accelerate launch --num_cpu_threads_per_process {self.num_cpu_threads_per_process}",
-            f"--mixed_precision {self.mixed_precision}",
-            f"hv_train_network.py",
-            f"--dit {self.dit_path}",
-            f"--dataset_config {self.dataset_config}",
+            f"accelerate launch --num_cpu_threads_per_process {self.num_cpu_threads_per_process} ",
+            f"--mixed_precision {self.mixed_precision} ",
+            f"hv_train_network.py ",
+            f"--dit {self.dit_path} ",
+            f"--dataset_config {self.dataset_config} ",
             "--sdpa" if self.attention == "sdpa" else "--sage_attn" if self.attention == "sage_attn" else "--flash_attn" if self.attention == "flash_attn" else "--xformers" if self.attention == "xformers" else "--sdpa",
-            "--fp8_base" if self.fp8_base else "",
+            f"--mixed_precision {self.mixed_precision} ",
+            "--fp8_base " if self.fp8_base else "",
             f"--blocks_to_swap {self.blocks_to_swap} --fp8_llm" if self.enable_lowvram else "",
-            f"--optimizer_type {self.optimizer_type}",
-            f"--learning_rate {self.learning_rate}",
+            f"--optimizer_type {self.optimizer_type} ",
+            f"--learning_rate {self.learning_rate} ",
             "--gradient_checkpointing" if self.gradient_checkpointing else "",
-            f"--gradient_accumulation_steps {self.gra}",
+            f"--gradient_accumulation_steps {self.gradient_accumulation_steps}",
             f"--max_data_loader_n_workers {self.max_data_loader_n_workers}",
             "--persistent_data_loader_workers" if self.persistent_data_loader_workers else "",
             f"--network_module {self.network_module}",
@@ -291,6 +292,7 @@ class TrainingConfig:
           "persistent_data_loader_workers": self.persistent_data_loader_workers,
           "network_module": self.network_module,
           "network_dim": self.network_dim,
+          "network_alpha": self.network_alpha,
           "timestep_sampling": self.timestep_sampling,
           "discrete_flow_shift": self.discrete_flow_shift,
           "max_train_epochs": self.max_train_epochs,
@@ -298,7 +300,10 @@ class TrainingConfig:
           "seed": self.seed,
           "num_cpu_threads_per_process": self.num_cpu_threads_per_process,
           "fp8_base": self.fp8_base,
-          "attention": self.attention
+          "attention": self.attention,
+          "enable_lowvram": self.enable_lowvram,
+          "block_to_swap": self.blocks_to_swap,
+          "gradient_accumulation_steps": self.gradient_accumulation_steps,
       }
       
       training_config_file = f"training_command.toml"
