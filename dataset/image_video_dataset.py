@@ -151,6 +151,12 @@ class ItemInfo:
 
 def save_latent_cache(item_info: ItemInfo, latent: torch.Tensor):
     assert latent.dim() == 4, "latent should be 4D tensor (frame, channel, height, width)"
+
+    # NaN check and show warning, replace NaN with 0
+    if torch.isnan(latent).any():
+        logger.warning(f"latent tensor has NaN: {item_info.item_key}, replace NaN with 0")
+        latent[torch.isnan(latent)] = 0
+
     metadata = {
         "architecture": "hunyuan_video",
         "width": f"{item_info.original_size[0]}",
@@ -175,6 +181,12 @@ def save_text_encoder_output_cache(item_info: ItemInfo, embed: torch.Tensor, mas
         embed.dim() == 1 or embed.dim() == 2
     ), f"embed should be 2D tensor (feature, hidden_size) or (hidden_size,), got {embed.shape}"
     assert mask is None or mask.dim() == 1, f"mask should be 1D tensor (feature), got {mask.shape}"
+
+    # NaN check and show warning, replace NaN with 0
+    if torch.isnan(embed).any():
+        logger.warning(f"embed tensor has NaN: {item_info.item_key}, replace NaN with 0")
+        embed[torch.isnan(embed)] = 0
+
     metadata = {
         "architecture": "hunyuan_video",
         "caption1": item_info.caption,
