@@ -16,7 +16,8 @@ from transformers.models.llama import LlamaModel
 from tqdm import tqdm
 import av
 from einops import rearrange
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
+from safetensors import safe_open
 
 from hunyuan_model import vae
 from hunyuan_model.text_encoder import TextEncoder
@@ -354,6 +355,7 @@ def parse_args():
     parser.add_argument("--blocks_to_swap", type=int, default=None, help="number of blocks to swap in the model")
     parser.add_argument("--img_in_txt_in_offloading", action="store_true", help="offload img_in and txt_in to cpu")
     parser.add_argument("--output_type", type=str, default="video", help="output type: video, latent or both")
+    parser.add_argument("--no_metadata", action="store_true", help="do not save metadata")
     parser.add_argument("--latent_path", type=str, default=None, help="path to latent for decode. no inference")
 
     args = parser.parse_args()
@@ -385,7 +387,14 @@ def main():
     logger.info(f"Using device: {device}, DiT precision: {dit_dtype}, weight precision: {dit_weight_dtype}")
 
     if args.latent_path is not None:
-        latents = torch.load(args.latent_path, map_location="cpu")
+        if os.path.splitext(args.latent_path)[1] != ".safetensors":
+            latents = torch.load(args.latent_path, map_location="cpu")
+        else:
+            latents = load_file(args.latent_path)["latent"]
+            with safe_open(args.latent_path, framework="pt") as f:
+                metadata = f.metadata()
+            logger.info(f"Loaded metadata: {metadata}")
+
         logger.info(f"Loaded latent from {args.latent_path}. Shape: {latents.shape}")
         latents = latents.unsqueeze(0)
         seeds = [0]  # dummy seed
@@ -461,7 +470,7 @@ def main():
         num_videos_per_prompt = 1  # args.num_videos
         seed = args.seed
         if seed is None:
-            seeds = [random.randint(0, 1_000_000) for _ in range(num_videos_per_prompt)]
+            seeds = [random.randint(0, 2**32 - 1) for _ in range(num_videos_per_prompt)]
         elif isinstance(seed, int):
             seeds = [seed + i for i in range(num_videos_per_prompt)]
         else:
@@ -560,8 +569,22 @@ def main():
     if output_type == "latent" or output_type == "both":
         # save latent
         for i, latent in enumerate(latents):
-            latent_path = f"{save_path}/{time_flag}_{i}_{seeds[i]}_latent.pt"
-            torch.save(latent, latent_path)
+            latent_path = f"{save_path}/{time_flag}_{i}_{seeds[i]}_latent.safetensors"
+
+            if args.no_metadata:
+                metadata = None
+            else:
+                metadata = {
+                    "seeds": f"{seeds[i]}",
+                    "prompt": prompt,
+                    "height": f"{height}",
+                    "width": f"{width}",
+                    "video_length": f"{video_length}",
+                    "infer_steps": f"{num_inference_steps}",
+                }
+            sd = {"latent": latent}
+            save_file(sd, latent_path, metadata=metadata)
+
             logger.info(f"Latent save to: {latent_path}")
     if output_type == "video" or output_type == "both":
         # save video

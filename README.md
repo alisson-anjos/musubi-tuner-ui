@@ -8,6 +8,10 @@ __This repository is under development.__
 
 ### Recent Updates
 
+- 04, Jan, 2025
+    - Added support for loading Text Encoder weights from .safetensors files. See [Model Download](#model-download) for instructions.
+    - Changed the format of latents saved by `hv_generate_video.py` to .safetensors. Metadata such as prompts will be saved in the .safetensors file. Use `--no_metadata` to disable saving metadata.
+
 - 03, Jan, 2025: The noise initialization method during inference has changed. When the same seed is specified, the common frames will be the same even if the number of generated frames is different. Please note that the inference results will be different from before even with the same seed.
 
 (For example, when 25 frames are specified, the time length of the latent is 7, and when 45 frames are specified, the time length of the latent is 12, but the first 7 frames of both will have the same noise value when the same seed is specified.)
@@ -46,7 +50,11 @@ Additionally, install `ascii-magic` (used for dataset verification), `matplotlib
 pip install ascii-magic matplotlib tensorboard
 ```
 
-### Model Download
+## Model Download
+
+There are two ways to download the model.
+
+### Use the Official HunyuanVideo Model
 
 Download the model following the [official README](https://github.com/Tencent/HunyuanVideo/blob/main/ckpts/README.md) and place it in your chosen directory with the following structure:
 
@@ -59,6 +67,22 @@ Download the model following the [official README](https://github.com/Tencent/Hu
     ├──text_encoder_2
     ├──...
 ```
+
+### Using ComfyUI Models for Text Encoder
+
+This method is easier.
+
+For DiT and VAE, use the HunyuanVideo models.
+
+From https://huggingface.co/tencent/HunyuanVideo/tree/main/hunyuan-video-t2v-720p/transformers, download [mp_rank_00_model_states.pt](https://huggingface.co/tencent/HunyuanVideo/resolve/main/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt) and place it in your chosen directory.
+
+(Note: The fp8 model on the same page is unverified.)
+
+From https://huggingface.co/tencent/HunyuanVideo/tree/main/hunyuan-video-t2v-720p/vae, download [pytorch_model.pt](https://huggingface.co/tencent/HunyuanVideo/resolve/main/hunyuan-video-t2v-720p/vae/pytorch_model.pt) and place it in your chosen directory.
+
+For the Text Encoder, use the models provided by ComfyUI. Refer to [ComfyUI's page](https://comfyanonymous.github.io/ComfyUI_examples/hunyuan_video/), from https://huggingface.co/Comfy-Org/HunyuanVideo_repackaged/tree/main/split_files/text_encoders, download `llava_llama3_fp16.safetensors` (Text Encoder 1, LLM) and `clip_l.safetensors` (Text Encoder 2, CLIP)  and place them in your chosen directory.
+
+(Note: The fp8 LLM model on the same page is unverified.)
 
 ## Usage
 

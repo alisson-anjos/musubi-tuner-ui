@@ -482,7 +482,11 @@ class ImageJsonlDatasource(ImageDatasource):
         self.data = []
         with open(self.image_jsonl_file, "r", encoding="utf-8") as f:
             for line in f:
-                data = json.loads(line)
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    logger.error(f"failed to load json: {line} @ {self.image_jsonl_file}")
+                    raise
                 self.data.append(data)
         logger.info(f"loaded {len(self.data)} images")
 

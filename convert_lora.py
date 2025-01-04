@@ -21,7 +21,7 @@ def convert_from_diffusers(prefix, weights_sd):
     lora_dims = {}
     for key, weight in weights_sd.items():
         diffusers_prefix, key_body = key.split(".", 1)
-        if diffusers_prefix != "diffusion_model":
+        if diffusers_prefix != "diffusion_model" and diffusers_prefix !="transformer":
             logger.warning(f"unexpected key: {key} in diffusers format")
             continue
 

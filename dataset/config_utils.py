@@ -312,7 +312,7 @@ def load_user_config(file: str) -> dict:
 
     if file.name.lower().endswith(".json"):
         try:
-            with open(file, "r") as f:
+            with open(file, "r", encoding="utf-8") as f:
                 config = json.load(f)
         except Exception:
             logger.error(

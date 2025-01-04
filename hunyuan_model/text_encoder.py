@@ -1,18 +1,145 @@
 from dataclasses import dataclass
+import json
+import os
 from typing import Optional, Tuple, Union
 from copy import deepcopy
 
 import torch
 import torch.nn as nn
-from transformers import CLIPTextModel, CLIPTokenizer, AutoTokenizer, AutoModel
+from transformers import (
+    CLIPTextModel,
+    CLIPTokenizer,
+    AutoTokenizer,
+    AutoModel,
+    CLIPConfig,
+    LlamaForCausalLM,
+    LlamaConfig,
+)
 from transformers.utils import ModelOutput
 from transformers.models.llama import LlamaModel
+from safetensors.torch import load_file
+from accelerate import init_empty_weights
 
 import logging
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
+
+CLIP_L_HUGGINGFACE_MODEL_ID = "openai/clip-vit-large-patch14"
+LLAVA_HUGGINGFACE_MODEL_ID = "xtuner/llava-llama-3-8b-v1_1-transformers"
+
+CLIP_CONFIG = {
+    "_name_or_path": "clip-vit-large-patch14/",
+    "architectures": ["CLIPModel"],
+    "initializer_factor": 1.0,
+    "logit_scale_init_value": 2.6592,
+    "model_type": "clip",
+    "projection_dim": 768,
+    #   "text_config": {
+    "_name_or_path": "",
+    "add_cross_attention": False,
+    "architectures": None,
+    "attention_dropout": 0.0,
+    "bad_words_ids": None,
+    "bos_token_id": 0,
+    "chunk_size_feed_forward": 0,
+    "cross_attention_hidden_size": None,
+    "decoder_start_token_id": None,
+    "diversity_penalty": 0.0,
+    "do_sample": False,
+    "dropout": 0.0,
+    "early_stopping": False,
+    "encoder_no_repeat_ngram_size": 0,
+    "eos_token_id": 2,
+    "finetuning_task": None,
+    "forced_bos_token_id": None,
+    "forced_eos_token_id": None,
+    "hidden_act": "quick_gelu",
+    "hidden_size": 768,
+    "id2label": {"0": "LABEL_0", "1": "LABEL_1"},
+    "initializer_factor": 1.0,
+    "initializer_range": 0.02,
+    "intermediate_size": 3072,
+    "is_decoder": False,
+    "is_encoder_decoder": False,
+    "label2id": {"LABEL_0": 0, "LABEL_1": 1},
+    "layer_norm_eps": 1e-05,
+    "length_penalty": 1.0,
+    "max_length": 20,
+    "max_position_embeddings": 77,
+    "min_length": 0,
+    "model_type": "clip_text_model",
+    "no_repeat_ngram_size": 0,
+    "num_attention_heads": 12,
+    "num_beam_groups": 1,
+    "num_beams": 1,
+    "num_hidden_layers": 12,
+    "num_return_sequences": 1,
+    "output_attentions": False,
+    "output_hidden_states": False,
+    "output_scores": False,
+    "pad_token_id": 1,
+    "prefix": None,
+    "problem_type": None,
+    "projection_dim": 768,
+    "pruned_heads": {},
+    "remove_invalid_values": False,
+    "repetition_penalty": 1.0,
+    "return_dict": True,
+    "return_dict_in_generate": False,
+    "sep_token_id": None,
+    "task_specific_params": None,
+    "temperature": 1.0,
+    "tie_encoder_decoder": False,
+    "tie_word_embeddings": True,
+    "tokenizer_class": None,
+    "top_k": 50,
+    "top_p": 1.0,
+    "torch_dtype": None,
+    "torchscript": False,
+    "transformers_version": "4.16.0.dev0",
+    "use_bfloat16": False,
+    "vocab_size": 49408,
+    #   },
+    #   "text_config_dict": {
+    "hidden_size": 768,
+    "intermediate_size": 3072,
+    "num_attention_heads": 12,
+    "num_hidden_layers": 12,
+    "projection_dim": 768,
+    #   },
+    #   "torch_dtype": "float32",
+    #   "transformers_version": null
+}
+
+LLAMA_CONFIG = {
+    "architectures": ["LlamaForCausalLM"],
+    "attention_bias": False,
+    "attention_dropout": 0.0,
+    "bos_token_id": 128000,
+    "eos_token_id": 128001,
+    "head_dim": 128,
+    "hidden_act": "silu",
+    "hidden_size": 4096,
+    "initializer_range": 0.02,
+    "intermediate_size": 14336,
+    "max_position_embeddings": 8192,
+    "mlp_bias": False,
+    "model_type": "llama",
+    "num_attention_heads": 32,
+    "num_hidden_layers": 32,
+    "num_key_value_heads": 8,
+    "pretraining_tp": 1,
+    "rms_norm_eps": 1e-05,
+    "rope_scaling": None,
+    "rope_theta": 500000.0,
+    "tie_word_embeddings": False,
+    "torch_dtype": "float16",
+    "transformers_version": "4.46.3",
+    "use_cache": True,
+    "vocab_size": 128320,
+}
 
 # When using decoder-only models, we must provide a prompt template to instruct the text encoder
 # on how to generate the text.
@@ -50,6 +177,68 @@ def use_default(value, default):
     return value if value is not None else default
 
 
+def load_clip_l(text_encoder_path: str, dtype: Optional[Union[str, torch.dtype]] = None):
+    if os.path.isdir(text_encoder_path):
+        # load from directory, configs are in the directory
+        text_encoder = CLIPTextModel.from_pretrained(text_encoder_path, torch_dtype=dtype)
+    else:
+        # load from file, we create the model with the appropriate config
+        config = CLIPConfig(**CLIP_CONFIG)
+        with init_empty_weights():
+            text_encoder = CLIPTextModel._from_config(config, torch_dtype=dtype)
+
+        state_dict = load_file(text_encoder_path)
+
+        text_encoder.load_state_dict(state_dict, strict=True, assign=True)
+    # if dtype is not None:
+    #     text_encoder.to(dtype=dtype)
+
+    return text_encoder
+
+
+def load_clip_l_tokenizer(tokenizer_path: str):
+    if os.path.isdir(tokenizer_path):
+        tokenizer = CLIPTokenizer.from_pretrained(tokenizer_path, max_length=77)
+    else:
+        # load from Hugging Face
+        logger.info(f"Loading tokenizer from Hugging Face: {CLIP_L_HUGGINGFACE_MODEL_ID}")
+        tokenizer = CLIPTokenizer.from_pretrained(CLIP_L_HUGGINGFACE_MODEL_ID, max_length=77)
+
+    return tokenizer
+
+
+def load_llm(text_encoder_path: str, dtype: Optional[Union[str, torch.dtype]] = None):
+    if os.path.isdir(text_encoder_path):
+        # load from directory, configs are in the directory
+        text_encoder = AutoModel.from_pretrained(text_encoder_path, low_cpu_mem_usage=True, torch_dtype=dtype)
+    else:
+        # load from file, we create the model with the appropriate config
+        config = LlamaConfig(**LLAMA_CONFIG)
+        with init_empty_weights():
+            text_encoder = LlamaForCausalLM._from_config(config, torch_dtype=dtype)
+
+        state_dict = load_file(text_encoder_path)
+
+        # support weights from ComfyUI
+        if "tokenizer" in state_dict:
+            state_dict.pop("tokenizer")
+
+        text_encoder.load_state_dict(state_dict, strict=True, assign=True)
+
+    return text_encoder
+
+
+def load_llm_tokenizer(tokenizer_path: str, padding_side="right"):
+    if os.path.isdir(tokenizer_path):
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+    else:
+        # load from Hugging Face
+        logger.info(f"Loading tokenizer from Hugging Face: {LLAVA_HUGGINGFACE_MODEL_ID}")
+        tokenizer = AutoTokenizer.from_pretrained(LLAVA_HUGGINGFACE_MODEL_ID, padding_side=padding_side)
+
+    return tokenizer
+
+
 def load_text_encoder(
     text_encoder_type: str,
     text_encoder_path: str,
@@ -60,11 +249,14 @@ def load_text_encoder(
     # reduce peak memory usage by specifying the dtype of the model
     dtype = text_encoder_dtype
     if text_encoder_type == "clipL":
-        text_encoder = CLIPTextModel.from_pretrained(text_encoder_path, torch_dtype=dtype)
+        text_encoder = load_clip_l(text_encoder_path, dtype=dtype)
         text_encoder.final_layer_norm = text_encoder.text_model.final_layer_norm
     elif text_encoder_type == "llm":
-        text_encoder = AutoModel.from_pretrained(text_encoder_path, low_cpu_mem_usage=True, torch_dtype=dtype)
-        text_encoder.final_layer_norm = text_encoder.norm
+        text_encoder = load_llm(text_encoder_path, dtype=dtype)
+        if hasattr(text_encoder, "norm"):
+            text_encoder.final_layer_norm = text_encoder.norm  # by from_pretrained
+        else:
+            text_encoder.final_layer_norm = text_encoder.model.norm  # by _from_config
     else:
         raise ValueError(f"Unsupported text encoder type: {text_encoder_type}")
     # from_pretrained will ensure that the model is in eval mode.
@@ -82,9 +274,9 @@ def load_tokenizer(tokenizer_type, tokenizer_path=None, padding_side="right"):
     logger.info(f"Loading tokenizer ({tokenizer_type}) from: {tokenizer_path}")
 
     if tokenizer_type == "clipL":
-        tokenizer = CLIPTokenizer.from_pretrained(tokenizer_path, max_length=77)
+        tokenizer = load_clip_l_tokenizer(tokenizer_path)
     elif tokenizer_type == "llm":
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, padding_side=padding_side)
+        tokenizer = load_llm_tokenizer(tokenizer_path, padding_side=padding_side)
     else:
         raise ValueError(f"Unsupported tokenizer type: {tokenizer_type}")
 
@@ -436,3 +628,83 @@ def load_text_encoder_2(
 
 
 # endregion
+
+
+if __name__ == "__main__":
+    import argparse
+    from utils.model_utils import str_to_dtype
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("type", type=str, help="Text Encoder type")
+    parser.add_argument("path1", type=str, help="Text Encoder directory or file 1")
+    parser.add_argument("path2", type=str, help="Text Encoder directory or file 2")
+    parser.add_argument("--dtype", type=str, default=None, help="Data type for Text Encoder")
+    args = parser.parse_args()
+
+    dtype = str_to_dtype(args.dtype) if args.dtype is not None else torch.float16
+
+    """
+    if args.type == "clipL":
+        text_encoder_1st = load_clip_l(args.path1, dtype=dtype)
+        tokenizer_1st = load_clip_l_tokenizer(args.path1)
+        text_encoder_2nd = load_clip_l(args.path2, dtype=dtype)
+        tokenizer_2nd = load_clip_l_tokenizer(args.path2)
+    elif args.type == "llm":
+        text_encoder_1st = load_llm(args.path1, dtype=dtype)
+        tokenizer_1st = load_llm_tokenizer(args.path1)
+        text_encoder_2nd = load_llm(args.path2, dtype=dtype)
+        tokenizer_2nd = load_llm_tokenizer(args.path2)
+
+    print(f"1st Text Encoder dtype: {text_encoder_1st.dtype}")
+    print(f"2nd Text Encoder dtype: {text_encoder_2nd.dtype}")
+
+    text_encoder_1st.to(device=device)
+    text_encoder_2nd.to(device=device)
+
+    test_text = "A cat sitting on a table"
+    token_ids_1st = tokenizer_1st(test_text, return_tensors="pt")["input_ids"]
+    token_ids_2nd = tokenizer_2nd(test_text, return_tensors="pt")["input_ids"]
+    assert torch.allclose(token_ids_1st, token_ids_2nd)
+    print(f"Token IDs are the same: {token_ids_1st}")
+
+    with torch.no_grad():
+        text_encoder_1st_output = text_encoder_1st(token_ids_1st.to(device), output_hidden_states=True)
+        text_encoder_2nd_output = text_encoder_2nd(token_ids_2nd.to(device), output_hidden_states=True)
+    print(f"1st Text Encoder output keys: {text_encoder_1st_output.keys()}")
+    print(f"2nd Text Encoder output keys: {text_encoder_2nd_output.keys()}")
+    for key in text_encoder_1st_output:
+        print(f"Checking output: {key}")
+        assert key in text_encoder_2nd_output, f"Key {key} not in 2nd Text Encoder output"
+        assert torch.allclose(text_encoder_1st_output[key], text_encoder_2nd_output[key])
+        print(f"Outputs are the same: {key}")
+    print("All outputs are the same.")
+    """
+
+    if args.type == "clipL":
+        text_encoder_1st = load_text_encoder_2(args.path1, device, dtype)
+        text_encoder_2nd = load_text_encoder_2(args.path2, device, dtype)
+    elif args.type == "llm":
+        text_encoder_1st = load_text_encoder_1(args.path1, device, False, dtype)
+        text_encoder_2nd = load_text_encoder_1(args.path2, device, False, dtype)
+    print(f"1st Text Encoder dtype: {text_encoder_1st.dtype}")
+    print(f"2nd Text Encoder dtype: {text_encoder_2nd.dtype}")
+
+    prompt = "A cat sitting on a table"
+    data_type = "video"  # video only, image is not supported
+    text_inputs_1st = text_encoder_1st.text2tokens(prompt, data_type=data_type)
+    text_inputs_2nd = text_encoder_2nd.text2tokens(prompt, data_type=data_type)
+    print(text_inputs_1st)
+    assert torch.allclose(text_inputs_1st["input_ids"], text_inputs_2nd["input_ids"])
+
+    with torch.no_grad():
+        prompt_outputs_1st = text_encoder_1st.encode(text_inputs_1st, data_type=data_type)
+        prompt_outputs_2nd = text_encoder_2nd.encode(text_inputs_1st, data_type=data_type)
+
+    # prompt_outputs.hidden_state, prompt_outputs.attention_mask
+    assert torch.allclose(prompt_outputs_1st.hidden_state, prompt_outputs_2nd.hidden_state)
+    print("Hidden states are the same.")
+    assert torch.allclose(prompt_outputs_1st.attention_mask, prompt_outputs_2nd.attention_mask)
+    print("Attention masks are the same.")
+    print("All outputs are the same.")

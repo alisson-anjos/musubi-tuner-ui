@@ -8,6 +8,10 @@ __リポジトリは開発中です。__
 
 ### 最近の更新
 
+- 2025/01/04
+    - Text Encoderの重みを .safetensors ファイルから読み込めるようにしました。[モデルのダウンロード](#モデルのダウンロード)の手順を参照してください。
+    - `hv_generate_video.py`でのlatentsの保存形式を.safetensorsに変更しました。またプロンプト等のメタデータが.safetensorsに保存されます。メタデータを保存したくない場合には、`--no_metadata`を指定してください。
+
 - 2025/01/03: 推論時のノイズ初期化方法が変わりました。同じseedを指定した時、生成フレーム数が異なっても、共通するフレーム分は同じになります。更新前とは同じseedでも推論結果が異なります。ご了承ください。
 
 （たとえば、25フレームを指定した時のlatentの時間長は7、45を指定した時のlatentの時間長は12ですが、両者の最初の7つは、同じseedを指定した時には同じノイズ値になります。）
@@ -46,7 +50,11 @@ pip install -r requirements.txt
 pip install ascii-magic matplotlib tensorboard
 ```
 
-### モデルのダウンロード
+## モデルのダウンロード
+
+以下のいずれかの方法で、モデルをダウンロードしてください。
+
+### HunyuanVideoの公式モデルを使う 
 
 [公式のREADME](https://github.com/Tencent/HunyuanVideo/blob/main/ckpts/README.md)を参考にダウンロードし、任意のディレクトリに以下のように配置します。
 
@@ -59,6 +67,20 @@ pip install ascii-magic matplotlib tensorboard
     ├──text_encoder_2
     ├──...
 ```
+
+### Text EncoderにComfyUI提供のモデルを使う
+
+こちらの方法の方がより簡単です。DiTとVAEのモデルはHumyuanVideoのものを使用します。
+
+https://huggingface.co/tencent/HunyuanVideo/tree/main/hunyuan-video-t2v-720p/transformers から、[mp_rank_00_model_states.pt](https://huggingface.co/tencent/HunyuanVideo/resolve/main/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt) をダウンロードし、任意のディレクトリに配置します。
+
+（同じページにfp8のモデルもありますが、未検証です。）
+
+また、https://huggingface.co/tencent/HunyuanVideo/tree/main/hunyuan-video-t2v-720p/vae から、[pytorch_model.pt](https://huggingface.co/tencent/HunyuanVideo/resolve/main/hunyuan-video-t2v-720p/vae/pytorch_model.pt) をダウンロードし、任意のディレクトリに配置します。
+
+Text EncoderにはComfyUI提供のモデルを使用させていただきます。[ComyUIのページ](https://comfyanonymous.github.io/ComfyUI_examples/hunyuan_video/)を参考に、https://huggingface.co/Comfy-Org/HunyuanVideo_repackaged/tree/main/split_files/text_encoders から、llava_llama3_fp16.safetensors （Text Encoder 1、LLM）と、clip_l.safetensors （Text Encoder 2、CLIP）をダウンロードし、任意のディレクトリに配置します。
+
+（同じページにfp8のLLMモデルもありますが、動作未検証です。）
 
 ## 使い方
 
