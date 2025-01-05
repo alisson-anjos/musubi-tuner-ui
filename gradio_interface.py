@@ -2,6 +2,7 @@ import queue
 import signal
 import subprocess
 import threading
+from typing import List
 import gradio as gr
 import os
 from datetime import datetime, timedelta
@@ -869,6 +870,66 @@ temp_base_dir = tempfile.mkdtemp()
 cleanup_thread = threading.Thread(target=cleanup_temp_files, args=(temp_base_dir,), daemon=True)
 cleanup_thread.start()
 
+def list_safetensors_files(output_dir: str) -> List[str]:
+    """
+    Lists all .safetensors files in the root of the specified directory.
+
+    Parameters:
+        output_dir (str): The path to the base directory.
+
+    Returns:
+        List[str]: A list of .safetensors file names in the root of output_dir.
+    """
+    try:
+        # List all entries in the directory
+        entries = os.listdir(output_dir)
+        
+        # Filter for files that end with .safetensors and are files (not directories)
+        safetensors_files = [
+            file for file in entries
+            if file.endswith('.safetensors') and os.path.isfile(os.path.join(output_dir, file))
+        ]
+        
+        return safetensors_files
+
+    except FileNotFoundError:
+        print(f"The directory '{output_dir}' does not exist.")
+        return []
+    except PermissionError:
+        print(f"Permission denied for accessing the directory '{output_dir}'.")
+        return []
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return []
+
+def process_selection(selected_files: List[str]) -> str:
+    """
+    Processes the selected files from the CheckboxGroup.
+
+    Parameters:
+        selected_files (List[str]): The list of selected .safetensors files.
+
+    Returns:
+        str: A confirmation message listing the selected files.
+    """
+    if not selected_files:
+        return "No files selected."
+    if any(file.startswith("Error:") or file.startswith("No .safetensors") for file in selected_files):
+        # Handle error messages
+        return "\n".join(selected_files)
+    return f"You selected: {', '.join(selected_files)}"
+
+def update_checkbox_group(output_dir: str) -> List[str]:
+    """
+    Updates the CheckboxGroup choices based on the current output_dir.
+
+    Parameters:
+        output_dir (str): The path to the base directory.
+
+    Returns:
+        List[str]: Updated list of .safetensors files or error messages.
+    """
+    return list_safetensors_files(output_dir)
 
 def train(dit_path, 
             vae_path,
@@ -909,7 +970,12 @@ def train(dit_path,
             frame_stride,
             frame_sample,
             video_enable_bucket,
-            video_bucket_no_upscale):
+            video_bucket_no_upscale,
+            enable_wandb,
+            wandb_run_name,
+            wandb_tracker_name,
+            wandb_api_key
+            ):
         try:
             os.makedirs(config_path, exist_ok=True)
         
@@ -975,6 +1041,9 @@ def train(dit_path,
                 
                 datasets_configs.append(VideoDataset(video_directory=dataset_videos_path, resolution=video_resolutions_list, batch_size=video_batch_size, target_frames=target_frames_list, frame_extraction=frame_extraction, frame_stride=frame_stride, frame_sample=frame_sample, enable_bucket=video_enable_bucket, bucket_no_upscale=video_bucket_no_upscale))
                 
+            if enable_wandb and (wandb_api_key is None or wandb_api_key == ""):
+                return "Error: Wandb is enabled but API KEY is required.", None
+
             config = DatasetConfig(general_config, datasets_configs)
             
             config.save(config_path)
@@ -1005,7 +1074,11 @@ def train(dit_path,
                 fp8_base=fp8_base,
                 enable_lowvram=enable_lowvram,
                 blocks_to_swap=blocks_to_swap,
-                attention=attention
+                attention=attention,
+                enable_wandb=enable_wandb,
+                wandb_run_name=wandb_run_name,
+                wandb_tracker_name=wandb_tracker_name,
+                wandb_api_key=wandb_api_key
             )
         
             training_config.save(config_path)
@@ -1313,12 +1386,14 @@ with gr.Blocks(theme=theme) as demo:
                 value=1,
                 info="Gradient Accumulation Steps"
             )
+            
+        with gr.Row():
             save_every = gr.Number(
                 label="Save Every N Epochs",
                 value=2,
                 info="Frequency to save checkpoints"
             )
-        with gr.Row():
+            
             network_dim = gr.Number(
                 label="Network dim",
                 value=32,
@@ -1374,6 +1449,7 @@ with gr.Blocks(theme=theme) as demo:
                 info="(optional) will overwrite the default general resolutions setting"
             )
             
+        with gr.Row():
             image_enable_bucket = gr.Checkbox(
                 label="Image Enable Bucket",
                 value=None,
@@ -1456,67 +1532,137 @@ with gr.Blocks(theme=theme) as demo:
             
         # Additional training parameters
         gr.Markdown("#### Additional Training Parameters")
-        with gr.Row():
-            attention = gr.Dropdown(
-                label="Attention",
-                choices=['sdpa', 'sage_attn', 'flash_attn', 'xformers'],
-                value="sdpa",
-                info=""
-            )
-            fp8_base = gr.Checkbox(
-                label="FP8 Base",
-                value=True,
-                info="Without this flag, mixed precision data type will be used. fp8 can significantly reduce memory consumption but may impact output quality"
-            )
-            enable_lowvram = gr.Checkbox(
-                label="Enable Low VRAM",
-                value=False,
-                info="VRAM: 12GB or more recommended for image training, 24GB or more recommended for video training (For 12GB, use a resolution of 960x544 or lower and use memory-saving enable this option)"
-            )
-            
-            blocks_to_swap = gr.Number(
-                label="Blocks to Swap",
-                value=20,
-                precision=0,
-                visible=False,
-                info="Number of blocks to swap (20-36)"
-            )
-            
-            def toggle_blocks_swap(checked):
-                return gr.update(visible=checked)
+        with gr.Column():
+            with gr.Row():
+                attention = gr.Dropdown(
+                    label="Attention",
+                    choices=['sdpa', 'sage_attn', 'flash_attn', 'xformers'],
+                    value="sdpa",
+                    info=""
+                )
+                fp8_base = gr.Checkbox(
+                    label="FP8 Base",
+                    value=True,
+                    info="Without this flag, mixed precision data type will be used. fp8 can significantly reduce memory consumption but may impact output quality"
+                )
+                enable_lowvram = gr.Checkbox(
+                    label="Enable Low VRAM",
+                    value=False,
+                    info="VRAM: 12GB or more recommended for image training, 24GB or more recommended for video training (For 12GB, use a resolution of 960x544 or lower and use memory-saving enable this option)"
+                )
+                
+                blocks_to_swap = gr.Number(
+                    label="Blocks to Swap",
+                    value=20,
+                    precision=0,
+                    visible=False,
+                    info="Number of blocks to swap (20-36)"
+                )
+                
+                def toggle_blocks_swap(checked):
+                    return gr.update(visible=checked)
 
-            enable_lowvram.change(
-                toggle_blocks_swap,
-                inputs=enable_lowvram,
-                outputs=blocks_to_swap
-            )
+                enable_lowvram.change(
+                    toggle_blocks_swap,
+                    inputs=enable_lowvram,
+                    outputs=blocks_to_swap
+                )
+            
+            with gr.Row():
+                gradient_checkpointing = gr.Checkbox(
+                    label="Gradiente Checkpointing",
+                    value=True,
+                    info="Enable Gradient Checkpointing"
+                )
+                persistent_data_loader_workers = gr.Checkbox(
+                    label="Persistent Data Loader Workers",
+                    value=True,
+                    info="Enable Persistent Data Loader Workers"
+                )
+                seed = gr.Number(
+                    label="Seed",
+                    value=42,
+                    info=""
+                )
         
-            # block_swap = gr.Checkbox(
-            #     label="FP8 Base",
-            #     value=True,
-            #     info="Without this flag, mixed precision data type will be used. fp8 can significantly reduce memory consumption but may impact output quality"
-            # )
-            gradient_checkpointing = gr.Checkbox(
-                label="Gradiente Checkpointing",
-                value=True,
-                info="Enable Gradient Checkpointing"
+        # gr.Markdown("#### Sample Settings")
+        # with gr.Row():
+        #     enable_generate_samples = gr.Checkbox(
+        #         label="Enable Generate Samples",
+        #         value=False,
+        #         info="Enable Generate Samples"
+        #     )
+            
+        #     with gr.Column():
+        #         sample_every_n_epochs = gr.Number(
+        #             label="Sample Every N Epochs",
+        #             value=None,
+        #             visible=False,
+        #             info="Generate sample images every N epochs"
+        #         )
+                
+        #         enable_sample_at_first = gr.Checkbox(
+        #             label="Enable Sample at First",
+        #             value=False,
+        #             visible=False,
+        #             info="Generate sample images before training"
+        #         )
+                
+        #         sample_prompts = gr.Textbox(
+        #             label="Sample Prompt 1",
+        #             visible=False,
+        #             info="Write the prompts separated by |, example: prompt 1|prompt 2|prompt 3"
+        #         )
+                
+        #     def toggle_sample(checked):
+        #         return gr.update(visible=checked), gr.update(visible=checked), gr.update(visible=checked)
+
+        #     enable_generate_samples.change(
+        #         toggle_sample,
+        #         inputs=enable_generate_samples,
+        #         outputs=[sample_every_n_epochs, enable_sample_at_first, sample_prompts]
+        #     )
+            
+        gr.Markdown("#### Monitoring Settings")
+        with gr.Row():
+            enable_wandb = gr.Checkbox(
+                label="Enable Wandb",
+                value=False,
+                info="Enable Wandb monitoring"
             )
-            persistent_data_loader_workers = gr.Checkbox(
-                label="Persistent Data Loader Workers",
-                value=True,
-                info="Enable Persistent Data Loader Workers"
+            
+            wandb_run_name = gr.Textbox(
+                label="Wandb Run Name",
+                info="Name of the wandb run",
+                visible=False
             )
-            seed = gr.Number(
-                label="Seed",
-                value=42,
-                info=""
+            
+            wandb_tracker_name = gr.Textbox(
+                label="Wandb Tracker Name",
+                info="Name of the wandb tracker",
+                visible=False
             )
-       
+            
+            wandb_api_key = gr.Textbox(
+                label="Wandb API Key",
+                info="Wandb API Key (https://wandb.ai/authorize)",
+                visible=False
+            )
+            
+            def toggle_enable_wandb(checked):
+                return gr.update(visible=checked), gr.update(visible=checked), gr.update(visible=checked)
+
+            enable_wandb.change(
+                toggle_enable_wandb,
+                inputs=enable_wandb,
+                outputs=[wandb_run_name, wandb_tracker_name, wandb_api_key]
+            )
+            
         with gr.Row():
             with gr.Column(scale=1):
-                resume_from_checkpoint = gr.Checkbox(label="Resume from last checkpoint", info="If this is your first training, do not check this box, because the output folder will not have a checkpoint (global_step....) and will cause an error")
+                # resume_from_checkpoint = gr.Checkbox(label="Resume from last checkpoint", info="If this is your first training, do not check this box, because the output folder will not have a checkpoint (global_step....) and will cause an error")
                 
-                only_double_blocks = gr.Checkbox(label="Train only double blocks (Experimental)", info="This option will be used to train only double blocks, some people report that training only double blocks can reduce the amount of motion blur and improve the final quality of the video.")
+                # only_double_blocks = gr.Checkbox(label="Train only double blocks (Experimental)", info="This option will be used to train only double blocks, some people report that training only double blocks can reduce the amount of motion blur and improve the final quality of the video.")
                 
                 train_button = gr.Button("Start Training", visible=True)
                 stop_button = gr.Button("Stop Training", visible=False)
@@ -1530,6 +1676,29 @@ with gr.Blocks(theme=theme) as demo:
                         )
                         
     hidden_config = gr.JSON(label="Hidden Configuration", visible=False)
+    
+    gr.Markdown("### Convert Lora file to ComfyUI format")
+    with gr.Row():
+        select_output_lora = gr.CheckboxGroup(
+            label="Lora Files",
+            choices=[],
+            info="Select one or more .safetensors files from the list above."
+        )
+        refresh_button = gr.Button("Refresh List")
+        
+        output = gr.Textbox(label="Result", interactive=False)
+        
+        refresh_button.click(
+            fn=update_checkbox_group,
+            inputs=output_dir,
+            outputs=select_output_lora
+        )
+        
+        select_output_lora.change(
+            fn=process_selection,
+            inputs=select_output_lora,
+            outputs=output
+        )
     
      # Adding Download Section
     gr.Markdown("### Download Files")
@@ -1587,6 +1756,10 @@ with gr.Blocks(theme=theme) as demo:
                            frame_sample,
                            video_enable_bucket,
                            video_bucket_no_upscale,
+                           enable_wandb,
+                           wandb_run_name,
+                           wandb_tracker_name,
+                           wandb_api_key
                            ):
         
         with process_lock:
@@ -1646,7 +1819,11 @@ with gr.Blocks(theme=theme) as demo:
             frame_stride,
             frame_sample,
             video_enable_bucket,
-            video_bucket_no_upscale
+            video_bucket_no_upscale,
+            enable_wandb,
+            wandb_run_name,
+            wandb_tracker_name,
+            wandb_api_key
         )
         
         if pid:
@@ -1684,7 +1861,7 @@ with gr.Blocks(theme=theme) as demo:
             max_train_epochs, save_every, seed, fp8_base, enable_lowvram, blocks_to_swap,attention, general_batch_size, general_resolutions,
             general_enable_bucket, general_bucket_no_upscale, image_resolutions, image_batch_size,
             image_enable_bucket, image_bucket_no_upscale, video_resolutions, video_batch_size, target_frames,
-            frame_extraction, frame_stride, frame_sample, video_enable_bucket, video_bucket_no_upscale
+            frame_extraction, frame_stride, frame_sample, video_enable_bucket, video_bucket_no_upscale, enable_wandb, wandb_run_name, wandb_tracker_name, wandb_api_key
         ],
         outputs=[output, training_process_pid, train_button, stop_button],
         api_name=None

@@ -19,4 +19,4 @@ matplotlib==3.10.0
 tensorboard
 moviepy==1.0.3
 sageattention==1.0.6
-
+wandb

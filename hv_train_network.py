@@ -231,6 +231,8 @@ def load_prompts(prompt_file: str) -> list[Dict]:
     elif prompt_file.endswith(".json"):
         with open(prompt_file, "r", encoding="utf-8") as f:
             prompts = json.load(f)
+    elif len(prompt_file) > 0:
+        prompts = prompt_file.replace("|", "\n")
 
     # preprocess prompts
     for i in range(len(prompts)):

@@ -202,6 +202,13 @@ class TrainingConfig:
         enable_lowvram: bool = False,
         blocks_to_swap: int = 20,
         attention: str = "sdpa",
+        enable_wandb: bool = False,
+        wandb_run_name: str = None,
+        wandb_tracker_name: str = None,
+        wandb_api_key: str = None,
+        enable_generate_samples: bool = False,
+        sample_every_n_epochs: int = 1,
+        sample_prompts: str = None,
     ):
         self.dit_path = dit_path
         self.vae_path = vae_path
@@ -231,7 +238,13 @@ class TrainingConfig:
         self.enable_lowvram = enable_lowvram
         self.blocks_to_swap = blocks_to_swap
         self.attention = attention
-
+        self.enable_wandb = enable_wandb
+        self.wandb_run_name = wandb_run_name
+        self.wandb_tracker_name = wandb_tracker_name
+        self.wandb_api_key = wandb_api_key
+        self.enable_generate_samples = enable_generate_samples
+        self.sample_every_n_epochs = sample_every_n_epochs
+        self.sample_prompts = sample_prompts
 
     def generate_command(self) -> str:
         
@@ -257,20 +270,25 @@ class TrainingConfig:
             f"--optimizer_type {self.optimizer_type} ",
             f"--learning_rate {self.learning_rate} ",
             "--gradient_checkpointing" if self.gradient_checkpointing else "",
-            f"--gradient_accumulation_steps {self.gradient_accumulation_steps}",
-            f"--max_data_loader_n_workers {self.max_data_loader_n_workers}",
+            f"--gradient_accumulation_steps {self.gradient_accumulation_steps} ",
+            f"--max_data_loader_n_workers {self.max_data_loader_n_workers} ",
             "--persistent_data_loader_workers" if self.persistent_data_loader_workers else "",
-            f"--network_module {self.network_module}",
-            f"--network_dim {self.network_dim}",
-            f"--network_alpha {self.network_alpha}",
-            f"--timestep_sampling {self.timestep_sampling}",
-            f"--discrete_flow_shift {self.discrete_flow_shift}",
-            f"--max_train_epochs {self.max_train_epochs}",
-            f"--save_every_n_epochs {self.save_every_n_epochs}",
-            f"--seed {self.seed}",
-            f"--logging_dir {self.log_dir}",
-            f"--log_with \"tensorboard\"",
-            f"--output_dir {self.output_dir}",
+            f"--network_module {self.network_module} ",
+            f"--network_dim {self.network_dim} ",
+            f"--network_alpha {self.network_alpha} ",
+            f"--timestep_sampling {self.timestep_sampling} ",
+            f"--discrete_flow_shift {self.discrete_flow_shift} ",
+            f"--max_train_epochs {self.max_train_epochs} ",
+            f"--save_every_n_epochs {self.save_every_n_epochs} ",
+            f"--seed {self.seed} ",
+            f"--logging_dir {self.log_dir} ",
+            f"--log_with \"all\" ",
+            f"--wandb_tracker_name {self.wandb_tracker_name} " if self.enable_wandb and self.wandb_tracker_name else "",
+            f"--wandb_run_name {self.wandb_run_name} " if self.enable_wandb and self.wandb_run_name else "",
+            f"--wandb_api_key {self.wandb_api_key} " if self.enable_wandb and self.wandb_api_key else "",
+            f"--sample_every_n_epochs {self.sample_every_n_epochs}"  if self.enable_generate_samples and self.sample_every_n_epochs else "",
+            f"--sample_prompts {self.sample_prompts} " if self.enable_generate_samples and self.sample_prompts else ""
+            f"--output_dir {self.output_dir} ",
             f"--output_name {self.output_name}",
         ]
         # Filter out empty flags
@@ -304,6 +322,11 @@ class TrainingConfig:
           "enable_lowvram": self.enable_lowvram,
           "block_to_swap": self.blocks_to_swap,
           "gradient_accumulation_steps": self.gradient_accumulation_steps,
+          "wandb_run_name": self.wandb_run_name,
+          "wandb_tracker_name": self.wandb_tracker_name,	
+          "wandb_api_key": self.wandb_api_key,
+          "sample_every_n_epochs": self.sample_every_n_epochs,
+          "sample_prompts": self.sample_prompts
       }
       
       training_config_file = f"training_command.toml"
