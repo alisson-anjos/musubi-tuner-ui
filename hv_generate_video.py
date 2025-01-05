@@ -18,6 +18,7 @@ import av
 from einops import rearrange
 from safetensors.torch import load_file, save_file
 from safetensors import safe_open
+from PIL import Image
 
 from hunyuan_model import vae
 from hunyuan_model.text_encoder import TextEncoder
@@ -41,6 +42,15 @@ def clean_memory_on_device(device):
         pass
     elif device.type == "mps":  # not tested
         torch.mps.empty_cache()
+
+
+def synchronize_device(device: torch.device):
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    elif device.type == "xpu":
+        torch.xpu.synchronize()
+    elif device.type == "mps":
+        torch.mps.synchronize()
 
 
 def save_videos_grid(videos: torch.Tensor, path: str, rescale=False, n_rows=1, fps=24):
@@ -102,6 +112,26 @@ def save_videos_grid(videos: torch.Tensor, path: str, rescale=False, n_rows=1, f
         container.mux(packet)
 
     container.close()
+
+
+def save_images_grid(videos: torch.Tensor, parent_dir: str, image_name: str, rescale: bool = False, n_rows: int = 1):
+    videos = rearrange(videos, "b c t h w -> t b c h w")
+    outputs = []
+    for x in videos:
+        x = torchvision.utils.make_grid(x, nrow=n_rows)
+        x = x.transpose(0, 1).transpose(1, 2).squeeze(-1)
+        if rescale:
+            x = (x + 1.0) / 2.0  # -1,1 -> 0,1
+        x = torch.clamp(x, 0, 1)
+        x = (x * 255).numpy().astype(np.uint8)
+        outputs.append(x)
+
+    output_dir = os.path.join(parent_dir, image_name)
+    os.makedirs(output_dir, exist_ok=True)
+    for i, x in enumerate(outputs):
+        image_path = os.path.join(output_dir, f"{image_name}_{i:03d}.png")
+        image = Image.fromarray(x)
+        image.save(image_path)
 
 
 # region Encoding prompt
@@ -354,13 +384,17 @@ def parse_args():
     )
     parser.add_argument("--blocks_to_swap", type=int, default=None, help="number of blocks to swap in the model")
     parser.add_argument("--img_in_txt_in_offloading", action="store_true", help="offload img_in and txt_in to cpu")
-    parser.add_argument("--output_type", type=str, default="video", help="output type: video, latent or both")
+    parser.add_argument(
+        "--output_type", type=str, default="video", choices=["video", "images", "latent", "both"], help="output type"
+    )
     parser.add_argument("--no_metadata", action="store_true", help="do not save metadata")
-    parser.add_argument("--latent_path", type=str, default=None, help="path to latent for decode. no inference")
+    parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
 
     args = parser.parse_args()
 
-    assert args.latent_path is None or args.output_type == "video", "latent-path is only supported with output-type=video"
+    assert (args.latent_path is None or len(args.latent_path) == 0) or (
+        args.output_type == "images" or args.output_type == "video"
+    ), "latent_path is only supported for images or video output"
 
     # update dit_weight based on model_base if not exists
 
@@ -386,18 +420,31 @@ def main():
     dit_weight_dtype = torch.float8_e4m3fn if args.fp8 else dit_dtype
     logger.info(f"Using device: {device}, DiT precision: {dit_dtype}, weight precision: {dit_weight_dtype}")
 
-    if args.latent_path is not None:
-        if os.path.splitext(args.latent_path)[1] != ".safetensors":
-            latents = torch.load(args.latent_path, map_location="cpu")
-        else:
-            latents = load_file(args.latent_path)["latent"]
-            with safe_open(args.latent_path, framework="pt") as f:
-                metadata = f.metadata()
-            logger.info(f"Loaded metadata: {metadata}")
+    original_base_names = None
+    if args.latent_path is not None and len(args.latent_path) > 0:
+        original_base_names = []
+        latents_list = []
+        seeds = []
+        for latent_path in args.latent_path:
+            original_base_names.append(os.path.splitext(os.path.basename(latent_path))[0])
+            seed = 0
 
-        logger.info(f"Loaded latent from {args.latent_path}. Shape: {latents.shape}")
-        latents = latents.unsqueeze(0)
-        seeds = [0]  # dummy seed
+            if os.path.splitext(latent_path)[1] != ".safetensors":
+                latents = torch.load(latent_path, map_location="cpu")
+            else:
+                latents = load_file(latent_path)["latent"]
+                with safe_open(latent_path, framework="pt") as f:
+                    metadata = f.metadata()
+                logger.info(f"Loaded metadata: {metadata}")
+
+                if "seeds" in metadata:
+                    seed = int(metadata["seeds"])
+
+            seeds.append(seed)
+            latents_list.append(latents)
+
+            logger.info(f"Loaded latent from {latent_path}. Shape: {latents.shape}")
+        latents = torch.stack(latents_list, dim=0)
     else:
         # prepare accelerator
         mixed_precision = "bf16" if dit_dtype == torch.bfloat16 else "fp16"
@@ -440,7 +487,10 @@ def main():
                     lora_multiplier, weights_sd, unet=transformer, for_inference=True
                 )
                 logger.info("Merging LoRA weights to DiT model")
-                network.merge_to(None, transformer, weights_sd, device=device)
+                network.merge_to(None, transformer, weights_sd, device=device, non_blocking=True)
+
+                synchronize_device(device)
+
                 logger.info("LoRA weights loaded")
 
         if blocks_to_swap > 0:
@@ -590,10 +640,20 @@ def main():
         # save video
         videos = decode_latents(args, latents, device)
         for i, sample in enumerate(videos):
+            original_name = "" if original_base_names is None else f"_{original_base_names[i]}"
             sample = sample.unsqueeze(0)
-            save_path = f"{save_path}/{time_flag}_{seeds[i]}.mp4"
-            save_videos_grid(sample, save_path, fps=24)
-            logger.info(f"Sample save to: {save_path}")
+            video_path = f"{save_path}/{time_flag}_{i}_{seeds[i]}{original_name}.mp4"
+            save_videos_grid(sample, video_path, fps=24)
+            logger.info(f"Sample save to: {video_path}")
+    elif output_type == "images":
+        # save images
+        videos = decode_latents(args, latents, device)
+        for i, sample in enumerate(videos):
+            original_name = "" if original_base_names is None else f"_{original_base_names[i]}"
+            sample = sample.unsqueeze(0)
+            image_name = f"{time_flag}_{i}_{seeds[i]}{original_name}"
+            save_images_grid(sample, save_path, image_name)
+            logger.info(f"Sample images save to: {save_path}/{image_name}")
 
     logger.info("Done!")
 
