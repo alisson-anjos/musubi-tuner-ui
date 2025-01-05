@@ -180,13 +180,25 @@ class LoRAInfModule(LoRAModule):
         self.network = network
 
     # merge weight to org_module
-    def merge_to(self, sd, dtype, device):
+    # def merge_to(self, sd, dtype, device, non_blocking=False):
+    #     if torch.cuda.is_available():
+    #         stream = torch.cuda.Stream(device=device)
+    #         with torch.cuda.stream(stream):
+    #             print(f"merge_to {self.lora_name}")
+    #             self._merge_to(sd, dtype, device, non_blocking)
+    #             torch.cuda.synchronize(device=device)
+    #             print(f"merge_to {self.lora_name} done")
+    #         torch.cuda.empty_cache()
+    #     else:
+    #         self._merge_to(sd, dtype, device, non_blocking)
+        
+    def merge_to(self, sd, dtype, device, non_blocking=False):
         # extract weight from org_module
         org_sd = self.org_module.state_dict()
         weight = org_sd["weight"]
         org_dtype = weight.dtype
         org_device = weight.device
-        weight = weight.to(device, dtype=torch.float)  # for calculation
+        weight = weight.to(device, dtype=torch.float, non_blocking=non_blocking)  # for calculation
 
         if dtype is None:
             dtype = org_dtype
@@ -195,8 +207,8 @@ class LoRAInfModule(LoRAModule):
 
         if self.split_dims is None:
             # get up/down weight
-            down_weight = sd["lora_down.weight"].to(device, dtype=torch.float)
-            up_weight = sd["lora_up.weight"].to(device, dtype=torch.float)
+            down_weight = sd["lora_down.weight"].to(device, dtype=torch.float, non_blocking=non_blocking)
+            up_weight = sd["lora_up.weight"].to(device, dtype=torch.float, non_blocking=non_blocking)
 
             # merge weight
             if len(weight.size()) == 2:
@@ -217,15 +229,15 @@ class LoRAInfModule(LoRAModule):
                 weight = weight + self.multiplier * conved * self.scale
 
             # set weight to org_module
-            org_sd["weight"] = weight.to(org_device, dtype=dtype)
+            org_sd["weight"] = weight.to(org_device, dtype=dtype)  # back to CPU without non_blocking
             self.org_module.load_state_dict(org_sd)
         else:
             # split_dims
             total_dims = sum(self.split_dims)
             for i in range(len(self.split_dims)):
                 # get up/down weight
-                down_weight = sd[f"lora_down.{i}.weight"].to(torch.float).to(device)  # (rank, in_dim)
-                up_weight = sd[f"lora_up.{i}.weight"].to(torch.float).to(device)  # (split dim, rank)
+                down_weight = sd[f"lora_down.{i}.weight"].to(device, torch.float, non_blocking=non_blocking)  # (rank, in_dim)
+                up_weight = sd[f"lora_up.{i}.weight"].to(device, torch.float, non_blocking=non_blocking)  # (split dim, rank)
 
                 # pad up_weight -> (total_dims, rank)
                 padded_up_weight = torch.zeros((total_dims, up_weight.size(0)), device=device, dtype=torch.float)
@@ -235,7 +247,7 @@ class LoRAInfModule(LoRAModule):
                 weight = weight + self.multiplier * (up_weight @ down_weight) * self.scale
 
             # set weight to org_module
-            org_sd["weight"] = weight.to(dtype)
+            org_sd["weight"] = weight.to(org_device, dtype)  # back to CPU without non_blocking
             self.org_module.load_state_dict(org_sd)
 
     # return weight for merge
@@ -587,16 +599,25 @@ class LoRANetwork(torch.nn.Module):
         return True
 
     # TODO refactor to common function with apply_to
-    def merge_to(self, text_encoders, unet, weights_sd, dtype=None, device=None):
-        for lora in self.text_encoder_loras + self.unet_loras:
-            sd_for_lora = {}
-            for key in weights_sd.keys():
-                if key.startswith(lora.lora_name):
-                    sd_for_lora[key[len(lora.lora_name) + 1 :]] = weights_sd[key]
-            if len(sd_for_lora) == 0:
-                logger.info(f"no weight for {lora.lora_name}")
-                continue
-            lora.merge_to(sd_for_lora, dtype, device)
+    def merge_to(self, text_encoders, unet, weights_sd, dtype=None, device=None, non_blocking=False):
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=2) as executor: # 2 workers is enough
+            futures = []
+            for lora in self.text_encoder_loras + self.unet_loras:
+                sd_for_lora = {}
+                for key in weights_sd.keys():
+                    if key.startswith(lora.lora_name):
+                        sd_for_lora[key[len(lora.lora_name) + 1 :]] = weights_sd[key]
+                if len(sd_for_lora) == 0:
+                    logger.info(f"no weight for {lora.lora_name}")
+                    continue
+
+                # lora.merge_to(sd_for_lora, dtype, device)
+                futures.append(executor.submit(lora.merge_to, sd_for_lora, dtype, device, non_blocking))
+
+        for future in futures:
+            future.result()
 
         logger.info(f"weights are merged")
 

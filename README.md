@@ -8,6 +8,9 @@ __This repository is under development.__
 
 ### Recent Updates
 
+- 05, Jan, 2025
+    - Added `images` to the save format in `hv_generate_video.py`. You can generate images from latents saved with `--latent_path`. You can also specify multiple latents with `--latent_path` for batch processing (increases VRAM usage).
+
 - 04, Jan, 2025
     - Added support for loading Text Encoder weights from .safetensors files. See [Model Download](#model-download) for instructions.
     - Changed the format of latents saved by `hv_generate_video.py` to .safetensors. Metadata such as prompts will be saved in the .safetensors file. Use `--no_metadata` to disable saving metadata.
@@ -175,7 +178,7 @@ If you're running low on VRAM, use `--blocks_to_swap` to offload some blocks to 
 
 For `--attn_mode`, specify either `flash`, `torch`, `sageattn`, or `sdpa` (same as `torch`). These correspond to FlashAttention, scaled dot product attention, and SageAttention respectively. Default is `torch`. SageAttention is effective for VRAM reduction.
 
-For `--output_type`, specify either `both`, `latent`, or `video`. `both` outputs both latents and video. Recommended to use `both` in case of Out of Memory errors during VAE processing. You can specify saved latents with `--latent_path` and use `--output_type video` to only perform VAE decoding.
+For `--output_type`, specify either `both`, `latent`, `video` or `images`. `both` outputs both latents and video. Recommended to use `both` in case of Out of Memory errors during VAE processing. You can specify saved latents with `--latent_path` and use `--output_type video` (or `images`) to only perform VAE decoding.
 
 `--seed` is optional. A random seed will be used if not specified.
 

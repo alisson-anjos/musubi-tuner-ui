@@ -8,6 +8,9 @@ __リポジトリは開発中です。__
 
 ### 最近の更新
 
+- 2025/01/05
+    - `hv_generate_video.py`で保存形式に `images` を追加しました。`--latent_path`に保存されたlatentを指定して、latentから画像を生成できます。また `--latent_path`に複数のlatentを指定できるようになりました（VRAM使用量は増加します）。
+
 - 2025/01/04
     - Text Encoderの重みを .safetensors ファイルから読み込めるようにしました。[モデルのダウンロード](#モデルのダウンロード)の手順を参照してください。
     - `hv_generate_video.py`でのlatentsの保存形式を.safetensorsに変更しました。またプロンプト等のメタデータが.safetensorsに保存されます。メタデータを保存したくない場合には、`--no_metadata`を指定してください。
@@ -173,7 +176,7 @@ VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブ�
 
 `--attn_mode`には`flash`、`torch`、`sageattn`、または`sdpa`（`torch`指定時と同じ）のいずれかを指定してください。それぞれFlashAttention、scaled dot product attention、SageAttentionに対応します。デフォルトは`torch`です。SageAttentionはVRAMの削減に有効です。
 
-`--output_type`には`both`、`latent`、`video`のいずれかを指定してください。`both`はlatentと動画の両方を出力します。VAEでOut of Memoryエラーが発生する場合に備えて、`both`を指定することをお勧めします。`--latent_path`に保存されたlatentを指定し、`--output_type video`としてスクリプトを実行すると、VAEのdecodeのみを行えます。
+`--output_type`には`both`、`latent`、`video`、`images`のいずれかを指定してください。`both`はlatentと動画の両方を出力します。VAEでOut of Memoryエラーが発生する場合に備えて、`both`を指定することをお勧めします。`--latent_path`に保存されたlatentを指定し、`--output_type video` （または`images`）としてスクリプトを実行すると、VAEのdecodeのみを行えます。
 
 `--seed`は省略可能です。指定しない場合はランダムなシードが使用されます。
 
