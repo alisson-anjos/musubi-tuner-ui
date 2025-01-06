@@ -40,10 +40,12 @@ class MMDoubleStreamBlock(nn.Module):
         dtype: Optional[torch.dtype] = None,
         device: Optional[torch.device] = None,
         attn_mode: str = "flash",
+        split_attn: bool = False,
     ):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
         self.attn_mode = attn_mode
+        self.split_attn = split_attn
 
         self.deterministic = False
         self.heads_num = heads_num
@@ -121,6 +123,7 @@ class MMDoubleStreamBlock(nn.Module):
         txt: torch.Tensor,
         vec: torch.Tensor,
         attn_mask: Optional[torch.Tensor] = None,
+        total_len: Optional[torch.Tensor] = None,
         cu_seqlens_q: Optional[torch.Tensor] = None,
         cu_seqlens_kv: Optional[torch.Tensor] = None,
         max_seqlen_q: Optional[int] = None,
@@ -189,6 +192,7 @@ class MMDoubleStreamBlock(nn.Module):
                 l,
                 mode=self.attn_mode,
                 attn_mask=attn_mask,
+                total_len=total_len,
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_kv=cu_seqlens_kv,
                 max_seqlen_q=max_seqlen_q,
@@ -269,10 +273,12 @@ class MMSingleStreamBlock(nn.Module):
         dtype: Optional[torch.dtype] = None,
         device: Optional[torch.device] = None,
         attn_mode: str = "flash",
+        split_attn: bool = False,
     ):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
         self.attn_mode = attn_mode
+        self.split_attn = split_attn
 
         self.deterministic = False
         self.hidden_size = hidden_size
@@ -314,6 +320,7 @@ class MMSingleStreamBlock(nn.Module):
         vec: torch.Tensor,
         txt_len: int,
         attn_mask: Optional[torch.Tensor] = None,
+        total_len: Optional[torch.Tensor] = None,
         cu_seqlens_q: Optional[torch.Tensor] = None,
         cu_seqlens_kv: Optional[torch.Tensor] = None,
         max_seqlen_q: Optional[int] = None,
@@ -362,6 +369,7 @@ class MMSingleStreamBlock(nn.Module):
                 l,
                 mode=self.attn_mode,
                 attn_mask=attn_mask,
+                total_len=total_len,
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_kv=cu_seqlens_kv,
                 max_seqlen_q=max_seqlen_q,
@@ -462,6 +470,8 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
         The device of the model.
     attn_mode: str
         The mode of the attention, default is flash.
+    split_attn: bool
+        Whether to use split attention (make attention as batch size 1).
     """
 
     # @register_to_config
@@ -488,6 +498,7 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
         dtype: Optional[torch.dtype] = None,
         device: Optional[torch.device] = None,
         attn_mode: str = "flash",
+        split_attn: bool = False,
     ):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
@@ -516,6 +527,8 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
         self.heads_num = heads_num
 
         self.attn_mode = attn_mode
+        self.split_attn = split_attn
+        print(f"Using {self.attn_mode} attention mode, split_attn: {self.split_attn}")
 
         # image projection
         self.img_in = PatchEmbed(self.patch_size, self.in_channels, self.hidden_size, **factory_kwargs)
@@ -556,6 +569,7 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
                     qk_norm_type=qk_norm_type,
                     qkv_bias=qkv_bias,
                     attn_mode=attn_mode,
+                    split_attn=split_attn,
                     **factory_kwargs,
                 )
                 for _ in range(mm_double_blocks_depth)
@@ -573,6 +587,7 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
                     qk_norm=qk_norm,
                     qk_norm_type=qk_norm_type,
                     attn_mode=attn_mode,
+                    split_attn=split_attn,
                     **factory_kwargs,
                 )
                 for _ in range(mm_single_blocks_depth)
@@ -734,7 +749,7 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
         max_seqlen_kv = max_seqlen_q
 
         attn_mask = total_len = None
-        if self.attn_mode == "torch":
+        if self.attn_mode == "torch" and not self.split_attn:
             # initialize attention mask: bool tensor for sdpa, (b, 1, n, n)
             bs = img.shape[0]
             attn_mask = torch.zeros((bs, 1, max_seqlen_q, max_seqlen_q), dtype=torch.bool, device=text_mask.device)
@@ -746,7 +761,7 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
             # set attention mask
             for i in range(bs):
                 attn_mask[i, :, : total_len[i], : total_len[i]] = True
-        elif self.attn_mode == "xformers":
+        else:
             total_len = text_mask.sum(dim=1) + img_seq_len  # (bs, )
 
         freqs_cis = (freqs_cos, freqs_sin) if freqs_cos is not None else None
@@ -756,7 +771,8 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
                 img,
                 txt,
                 vec,
-                attn_mask if attn_mask is not None else total_len,  # total_len for xformers
+                attn_mask,
+                total_len,
                 cu_seqlens_q,
                 cu_seqlens_kv,
                 max_seqlen_q,
@@ -785,7 +801,8 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
                     x,
                     vec,
                     txt_seq_len,
-                    attn_mask if attn_mask is not None else total_len,  # total_len for xformers
+                    attn_mask,
+                    total_len,
                     cu_seqlens_q,
                     cu_seqlens_kv,
                     max_seqlen_q,
@@ -921,9 +938,9 @@ def load_state_dict(model, model_path):
     return model
 
 
-def load_transformer(dit_path, attn_mode, device, dtype) -> HYVideoDiffusionTransformer:
+def load_transformer(dit_path, attn_mode, split_attn, device, dtype) -> HYVideoDiffusionTransformer:
     # =========================== Build main model ===========================
-    factor_kwargs = {"device": device, "dtype": dtype, "attn_mode": attn_mode}
+    factor_kwargs = {"device": device, "dtype": dtype, "attn_mode": attn_mode, "split_attn": split_attn}
     latent_channels = 16
     in_channels = latent_channels
     out_channels = latent_channels

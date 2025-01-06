@@ -8,6 +8,9 @@ __リポジトリは開発中です。__
 
 ### 最近の更新
 
+- 2025/01/06
+    - `hv_train_network.py`と`hv_generate_video.py`に、attentionを分割して処理する`--split_attn`オプションを追加しました。推論時にはSageAttention利用時に10%程度の高速化が見込まれます。学習時にはほぼ影響ありません。`--split_attn`を指定しない場合は、従来の方法で処理されます。`attn_mode`が`flash`の場合は指定できません。
+
 - 2025/01/05
     - `hv_generate_video.py`で保存形式に `images` を追加しました。`--latent_path`に保存されたlatentを指定して、latentから画像を生成できます。また `--latent_path`に複数のlatentを指定できるようになりました（VRAM使用量は増加します）。
 
@@ -160,7 +163,7 @@ VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブ�
 ```bash
 python hv_generate_video.py --fp8 --video_size 544 960 --video_length 5 --infer_steps 30 
     --prompt "A cat walks on the grass, realistic style."  --save_path path/to/save/dir --output_type both 
-    --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt --attn_mode sdpa 
+    --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt --attn_mode sdpa --split_attn
     --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt 
     --vae_chunk_size 32 --vae_spatial_tile_sample_min_size 128 
     --text_encoder1 path/to/ckpts/text_encoder 
@@ -175,6 +178,8 @@ python hv_generate_video.py --fp8 --video_size 544 960 --video_length 5 --infer_
 VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブロックをCPUにオフロードしてください。最大38が指定できます。
 
 `--attn_mode`には`flash`、`torch`、`sageattn`、または`sdpa`（`torch`指定時と同じ）のいずれかを指定してください。それぞれFlashAttention、scaled dot product attention、SageAttentionに対応します。デフォルトは`torch`です。SageAttentionはVRAMの削減に有効です。
+
+`--split_attn`を指定すると、attentionを分割して処理します。SageAttention利用時で10%程度の高速化が見込まれます。`attn_mode`が`flash`の場合は指定できません。
 
 `--output_type`には`both`、`latent`、`video`、`images`のいずれかを指定してください。`both`はlatentと動画の両方を出力します。VAEでOut of Memoryエラーが発生する場合に備えて、`both`を指定することをお勧めします。`--latent_path`に保存されたlatentを指定し、`--output_type video` （または`images`）としてスクリプトを実行すると、VAEのdecodeのみを行えます。
 

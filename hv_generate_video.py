@@ -378,6 +378,7 @@ def parse_args():
     parser.add_argument(
         "--attn_mode", type=str, default="torch", choices=["flash", "torch", "sageattn", "xformers", "sdpa"], help="attention mode"
     )
+    parser.add_argument("--split_attn", action="store_true", help="use split attention")
     parser.add_argument("--vae_chunk_size", type=int, default=None, help="chunk size for CausalConv3d in VAE")
     parser.add_argument(
         "--vae_spatial_tile_sample_min_size", type=int, default=None, help="spatial tile sample min size for VAE, default 256"
@@ -470,7 +471,7 @@ def main():
         logger.info(f"Loading DiT model from {args.dit}")
         if args.attn_mode == "sdpa":
             args.attn_mode = "torch"
-        transformer = load_transformer(args.dit, args.attn_mode, loading_device, dit_dtype)
+        transformer = load_transformer(args.dit, args.attn_mode, args.split_attn, loading_device, dit_dtype)
         transformer.eval()
 
         # load LoRA weights

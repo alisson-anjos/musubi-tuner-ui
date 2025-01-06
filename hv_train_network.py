@@ -388,7 +388,7 @@ class NetworkTrainer:
         logger.info(f"cache Text Encoder outputs for sample prompt: {sample_prompts}")
         prompts = load_prompts(sample_prompts)
 
-        def encode_for_text_encoder(text_encoder):
+        def encode_for_text_encoder(text_encoder, is_llm=True):
             sample_prompts_te_outputs = {}  # (prompt) -> (embeds, mask)
             with accelerator.autocast(), torch.no_grad():
                 for prompt_dict in prompts:
@@ -439,7 +439,7 @@ class NetworkTrainer:
     def get_optimizer(self, args, trainable_params: list[torch.nn.Parameter]) -> tuple[str, str, torch.optim.Optimizer]:
         # adamw, adamw8bit, adafactor
 
-        optimizer_type = args.optimizer_type
+        optimizer_type = args.optimizer_type.lower()
 
         # split optimizer_type and optimizer_args
         optimizer_kwargs = {}
@@ -970,7 +970,7 @@ class NetworkTrainer:
             raise ValueError(
                 f"either --sdpa, --flash-attn, --sage-attn or --xformers must be specified / --sdpa, --flash-attn, --sage-attn, --xformersのいずれかを指定してください"
             )
-        transformer = load_transformer(args.dit, attn_mode, loading_device, dit_weight_dtype)
+        transformer = load_transformer(args.dit, attn_mode, args.split_attn, loading_device, dit_weight_dtype)
         transformer.eval()
         transformer.requires_grad_(False)
 
@@ -1595,6 +1595,13 @@ def setup_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="use xformers for CrossAttention, requires xformers / CrossAttentionにxformersを使う、xformersが必要",
     )
+    parser.add_argument(
+        "--split_attn",
+        action="store_true",
+        help="use split attention for attention calculation (split batch size=1, affects memory usage and speed)"
+        " / attentionを分割して計算する（バッチサイズ=1に分割、メモリ使用量と速度に影響）",
+    )
+
     parser.add_argument("--max_train_steps", type=int, default=1600, help="training steps / 学習ステップ数")
     parser.add_argument(
         "--max_train_epochs",

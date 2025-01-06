@@ -16,12 +16,13 @@ except ImportError:
 
 try:
     print(f"Trying to import sageattention")
-    from sageattention import sageattn_varlen
+    from sageattention import sageattn_varlen, sageattn
 
     print("Successfully imported sageattention")
 except ImportError:
     print(f"Failed to import sageattention")
     sageattn_varlen = None
+    sageattn = None
 
 try:
     import xformers.ops as xops
@@ -38,6 +39,10 @@ MEMORY_LAYOUT = {
     "sageattn": (
         lambda x: x.view(x.shape[0] * x.shape[1], *x.shape[2:]),
         lambda x: x,
+    ),
+    "sageattn_fixlen": (
+        lambda x: x.transpose(1, 2),
+        lambda x: x.transpose(1, 2),
     ),
     "torch": (
         lambda x: x.transpose(1, 2),
@@ -87,6 +92,7 @@ def attention(
     mode="flash",
     drop_rate=0,
     attn_mask=None,
+    total_len=None,
     causal=False,
     cu_seqlens_q=None,
     cu_seqlens_kv=None,
@@ -117,66 +123,77 @@ def attention(
         torch.Tensor: Output tensor after self attention with shape [b, s, ad]
     """
     q, k, v = q_or_qkv_list if type(q_or_qkv_list) == list else (q_or_qkv_list, k, v)
+    if type(q_or_qkv_list) == list:
+        q_or_qkv_list.clear()
+    split_attn = total_len is not None
+    if split_attn and mode == "sageattn":
+        mode = "sageattn_fixlen"
     pre_attn_layout, post_attn_layout = MEMORY_LAYOUT[mode]
-    q = pre_attn_layout(q)
-    k = pre_attn_layout(k)
-    v = pre_attn_layout(v)
+
+    # trim the sequence length to the actual length instead of attn_mask
+    if split_attn:
+        trimmed_len = q.shape[1] - total_len
+        q = [q[i : i + 1, : total_len[i]] for i in range(len(q))]
+        k = [k[i : i + 1, : total_len[i]] for i in range(len(k))]
+        v = [v[i : i + 1, : total_len[i]] for i in range(len(v))]
+        q = [pre_attn_layout(q_i) for q_i in q]
+        k = [pre_attn_layout(k_i) for k_i in k]
+        v = [pre_attn_layout(v_i) for v_i in v]
+        # print(
+        #     f"Trimming the sequence length to {total_len},trimmed_len: {trimmed_len}, q.shape: {[q_i.shape for q_i in q]}, mode: {mode}"
+        # )
+    else:
+        q = pre_attn_layout(q)
+        k = pre_attn_layout(k)
+        v = pre_attn_layout(v)
 
     if mode == "torch":
-        if attn_mask is not None and attn_mask.dtype != torch.bool:
-            attn_mask = attn_mask.to(q.dtype)
-        x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=drop_rate, is_causal=causal)
-        if type(q_or_qkv_list) == list:
-            q_or_qkv_list.clear()
-        del q, k, v
-        del attn_mask
-    elif mode == "xformers":
-        total_len = attn_mask  # reuse variable TODO change variable name
+        if split_attn:
+            x = []
+            for i in range(len(q)):
+                x_i = F.scaled_dot_product_attention(q[i], k[i], v[i], dropout_p=drop_rate, is_causal=causal)
+                q[i], k[i], v[i] = None, None, None
+                x.append(x_i)
+            del q, k, v
+        else:
+            if attn_mask is not None and attn_mask.dtype != torch.bool:
+                attn_mask = attn_mask.to(q.dtype)
+            x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=drop_rate, is_causal=causal)
+            del q, k, v
+            del attn_mask
 
+    elif mode == "xformers":
         # B, M, H, K: M is the sequence length, H is the number of heads, K is the dimension of the heads -> it is same as input dimension
         # currently only support batch_size = 1
-        assert q.shape[0] == 1, "Currently only support batch_size = 1"
-        seq_len = q.shape[1]
-        q = q[:, : total_len[0]]
-        k = k[:, : total_len[0]]
-        v = v[:, : total_len[0]]
-        x = xops.memory_efficient_attention(q, k, v, p=drop_rate)  # , causal=causal)
+        assert split_attn, "Xformers only supports splitting"
+        x = []
+        for i in range(len(q)):
+            x_i = xops.memory_efficient_attention(q[i], k[i], v[i], p=drop_rate)  # , causal=causal)
+            q[i], k[i], v[i] = None, None, None
+            x.append(x_i)
         del q, k, v
 
-        # pad to the original sequence length
-        x = F.pad(x, (0, 0, 0, 0, 0, seq_len - x.shape[1]))
-
     elif mode == "flash":
-        x = flash_attn_varlen_func(
-            q,
-            k,
-            v,
-            cu_seqlens_q,
-            cu_seqlens_kv,
-            max_seqlen_q,
-            max_seqlen_kv,
-        )
-        if type(q_or_qkv_list) == list:
-            q_or_qkv_list.clear()
+        assert not split_attn, "Flash attention does not support splitting"
+        x = flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv)
         del q, k, v
         # x with shape [(bxs), a, d]
         x = x.view(batch_size, max_seqlen_q, x.shape[-2], x.shape[-1])  # reshape x to [b, s, a, d]
     elif mode == "sageattn":
-        x = sageattn_varlen(
-            q,
-            k,
-            v,
-            cu_seqlens_q,
-            cu_seqlens_kv,
-            max_seqlen_q,
-            max_seqlen_kv,
-        )
-        if type(q_or_qkv_list) == list:
-            q_or_qkv_list.clear()
+        x = sageattn_varlen(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv)
         del q, k, v
         # x with shape [(bxs), a, d]
         x = x.view(batch_size, max_seqlen_q, x.shape[-2], x.shape[-1])  # reshape x to [b, s, a, d]
+    elif mode == "sageattn_fixlen":
+        x = []
+        for i in range(len(q)):
+            # HND seems to cause an error
+            x_i = sageattn(q[i], k[i], v[i])  # (batch_size, seq_len, head_num, head_dim)
+            q[i], k[i], v[i] = None, None, None
+            x.append(x_i)
+        del q, k, v
     elif mode == "vanilla":
+        assert not split_attn, "Vanilla attention does not support trimming"
         scale_factor = 1 / math.sqrt(q.size(-1))
 
         b, a, s, _ = q.shape
@@ -204,7 +221,14 @@ def attention(
     else:
         raise NotImplementedError(f"Unsupported attention mode: {mode}")
 
-    x = post_attn_layout(x)
+    if split_attn:
+        x = [post_attn_layout(x_i) for x_i in x]
+        for i in range(len(x)):
+            x[i] = F.pad(x[i], (0, 0, 0, 0, 0, trimmed_len[i]))
+        x = torch.cat(x, dim=0)
+    else:
+        x = post_attn_layout(x)
+
     b, s, a, d = x.shape
     out = x.reshape(b, s, -1)
     return out

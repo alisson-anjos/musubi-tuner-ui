@@ -8,6 +8,9 @@ __This repository is under development.__
 
 ### Recent Updates
 
+- 06, Jan, 2025
+    - Added `--split_attn` option to `hv_train_network.py` and `hv_generate_video.py` to process attention in chunks. Inference with SageAttention is expected to be about 10% faster. There is almost no impact during training. If `--split_attn` is not specified, it will be processed in the conventional way. Cannot be specified when `attn_mode` is `flash`.
+
 - 05, Jan, 2025
     - Added `images` to the save format in `hv_generate_video.py`. You can generate images from latents saved with `--latent_path`. You can also specify multiple latents with `--latent_path` for batch processing (increases VRAM usage).
 
@@ -162,7 +165,7 @@ Generate videos using the following command:
 ```bash
 python hv_generate_video.py --fp8 --video_size 544 960 --video_length 5 --infer_steps 30 
     --prompt "A cat walks on the grass, realistic style."  --save_path path/to/save/dir --output_type both 
-    --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt --attn_mode sdpa 
+    --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt --attn_mode sdpa --split_attn
     --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt 
     --vae_chunk_size 32 --vae_spatial_tile_sample_min_size 128 
     --text_encoder1 path/to/ckpts/text_encoder 
@@ -177,6 +180,8 @@ Specifying `--fp8` runs DiT in fp8 mode. fp8 can significantly reduce memory con
 If you're running low on VRAM, use `--blocks_to_swap` to offload some blocks to CPU. Maximum value is 38.
 
 For `--attn_mode`, specify either `flash`, `torch`, `sageattn`, or `sdpa` (same as `torch`). These correspond to FlashAttention, scaled dot product attention, and SageAttention respectively. Default is `torch`. SageAttention is effective for VRAM reduction.
+
+Specifing `--split_attn` will process attention in chunks. Inference with SageAttention is expected to be about 10% faster. Cannot be specified when `attn_mode` is `flash`.
 
 For `--output_type`, specify either `both`, `latent`, `video` or `images`. `both` outputs both latents and video. Recommended to use `both` in case of Out of Memory errors during VAE processing. You can specify saved latents with `--latent_path` and use `--output_type video` (or `images`) to only perform VAE decoding.
 
