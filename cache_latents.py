@@ -131,7 +131,7 @@ def encode_and_save_batch(vae: AutoencoderKLCausal3D, batch: list[ItemInfo]):
     # print(f"encode batch: {contents.shape}")
     with torch.no_grad():
         latent = vae.encode(contents).latent_dist.sample()
-        latent = latent * vae.config.scaling_factor
+        # latent = latent * vae.config.scaling_factor
 
     # # debug: decode and save
     # with torch.no_grad():

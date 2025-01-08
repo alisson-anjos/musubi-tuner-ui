@@ -8,6 +8,9 @@ __This repository is under development.__
 
 ### Recent Updates
 
+- 08, Jan, 2025
+    - __Important Update__: Fixed a bug where latents were scaled twice during caching and training. Please re-run `cache_latents.py` (without specifying `--skip_existing`) to re-cache latents.
+
 - 06, Jan, 2025
     - Added `--split_attn` option to `hv_train_network.py` and `hv_generate_video.py` to process attention in chunks. Inference with SageAttention is expected to be about 10% faster. There is almost no impact during training. If `--split_attn` is not specified, it will be processed in the conventional way. Cannot be specified when `attn_mode` is `flash`.
 

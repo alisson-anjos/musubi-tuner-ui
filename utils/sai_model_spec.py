@@ -102,6 +102,7 @@ def build_metadata(
     tags: Optional[str] = None,
     merged_from: Optional[str] = None,
     timesteps: Optional[Tuple[int, int]] = None,
+    is_lora: bool = True,
 ):
     metadata = {}
     metadata.update(BASE_METADATA)
@@ -112,14 +113,15 @@ def build_metadata(
     # metadata["modelspec.hash_sha256"] = hash
 
     arch = ARCH_HUNYUAN_VIDEO
-    arch += f"/{ADAPTER_LORA}"
+    if is_lora:
+        arch += f"/{ADAPTER_LORA}"
     metadata["modelspec.architecture"] = arch
 
     impl = IMPL_HUNYUAN_VIDEO
     metadata["modelspec.implementation"] = impl
 
     if title is None:
-        title = "LoRA"
+        title = "LoRA" if is_lora else "Hunyuan-Video"
         title += f"@{timestamp}"
     metadata[MODELSPEC_TITLE] = title
 

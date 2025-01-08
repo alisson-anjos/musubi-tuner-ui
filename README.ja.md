@@ -8,6 +8,9 @@ __リポジトリは開発中です。__
 
 ### 最近の更新
 
+- 2025/01/08
+    - __重要な更新__：latentsがキャッシュ時と学習時の二回、scalingされる不具合を修正しました。お手数ですが、cache_latents.pyを（`--skip_existing`を指定せずに）再度実行して、latentsを再キャッシュしてください。
+
 - 2025/01/06
     - `hv_train_network.py`と`hv_generate_video.py`に、attentionを分割して処理する`--split_attn`オプションを追加しました。推論時にはSageAttention利用時に10%程度の高速化が見込まれます。学習時にはほぼ影響ありません。`--split_attn`を指定しない場合は、従来の方法で処理されます。`attn_mode`が`flash`の場合は指定できません。
 
