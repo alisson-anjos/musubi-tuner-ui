@@ -128,6 +128,11 @@ def encode_and_save_batch(vae: AutoencoderKLCausal3D, batch: list[ItemInfo]):
     contents = contents.to(vae.device, dtype=vae.dtype)
     contents = contents / 127.5 - 1.0  # normalize to [-1, 1]
 
+    h, w = contents.shape[3], contents.shape[4]
+    if h < 8 or w < 8:
+        item = batch[0]  # other items should have the same size
+        raise ValueError(f"Image or video size too small: {item.item_key} and {len(batch) - 1} more, size: {item.original_size}")
+
     # print(f"encode batch: {contents.shape}")
     with torch.no_grad():
         latent = vae.encode(contents).latent_dist.sample()
