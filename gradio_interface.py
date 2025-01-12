@@ -1,3 +1,4 @@
+import argparse
 import queue
 import signal
 import subprocess
@@ -15,16 +16,15 @@ import time
 from pathlib import Path
 from config_classes import GeneralConfig, ImageDataset, VideoDataset, TrainingConfig, DatasetConfig
 
-DEVELOPMENT = False
-
 # Determine if running on container by checking the environment variable
 IS_CONTAINER = os.getenv("IS_CONTAINER", "false").lower() == "true"
 
 # Working directories
-MODEL_DIR = "/workspace/models" if IS_CONTAINER else os.path.join(os.getcwd(), "models")
-DATASET_DIR = "/workspace/datasets" if IS_CONTAINER else os.path.join(os.getcwd(), "datasets") 
-OUTPUT_DIR = "/workspace/outputs" if IS_CONTAINER else os.path.join(os.getcwd(), "outputs")
-CONFIG_DIR = "/workspace/configs" if IS_CONTAINER else os.path.join(os.getcwd(), "configs") 
+MODEL_DIR = "/workspace/models"
+DATASET_DIR = "/workspace/datasets"
+OUTPUT_DIR = "/workspace/outputs"
+CONFIG_DIR = "/workspace/configs"
+
 
 # Maximum number of media to display in the gallery
 MAX_MEDIA = 50
@@ -104,17 +104,17 @@ def get_datasets():
     return datasets
 
 def load_training_config(dataset_name):
-    training_config_path = os.path.join(CONFIG_DIR, dataset_name, "training_config.toml")
+    training_command_path = os.path.join(CONFIG_DIR, dataset_name, "training_command.toml")
     dataset_config_path = os.path.join(CONFIG_DIR, dataset_name, "dataset_config.toml")
     
     config = {}
     
     # Load training configuration
-    if not os.path.exists(training_config_path):
+    if not os.path.exists(training_command_path):
         return None, f"Training configuration file not found for the dataset '{dataset_name}'."
     
     try:
-        with open(training_config_path, "r") as f:
+        with open(training_command_path, "r") as f:
             training_config = toml.load(f)
         config.update(training_config)
     except Exception as e:
@@ -974,8 +974,9 @@ def train(dit_path,
             enable_wandb,
             wandb_run_name,
             wandb_tracker_name,
-            wandb_api_key
-            ):
+            wandb_api_key,
+            split_attn
+        ):
         try:
             os.makedirs(config_path, exist_ok=True)
         
@@ -1078,7 +1079,8 @@ def train(dit_path,
                 enable_wandb=enable_wandb,
                 wandb_run_name=wandb_run_name,
                 wandb_tracker_name=wandb_tracker_name,
-                wandb_api_key=wandb_api_key
+                wandb_api_key=wandb_api_key,
+                split_attn=split_attn
             )
         
             training_config.save(config_path)
@@ -1101,7 +1103,8 @@ def train(dit_path,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 preexec_fn=os.setsid,
-                universal_newlines=False  # To handle bytes
+                universal_newlines=False,  # To handle bytes
+                encoding='utf-8'
             )
         
             with process_lock:
@@ -1540,6 +1543,13 @@ with gr.Blocks(theme=theme) as demo:
                     value="sdpa",
                     info=""
                 )
+                split_attn = gr.Checkbox(
+                    label="Split Attention",
+                    value=False,
+                    info="Process attention in chunks. Inference with SageAttention is expected to be about 10% faster. There is almost no impact during training. Cannot be specified when attn_mode is flash"
+                )
+                
+            with gr.Row():
                 fp8_base = gr.Checkbox(
                     label="FP8 Base",
                     value=True,
@@ -1686,7 +1696,7 @@ with gr.Blocks(theme=theme) as demo:
         )
         refresh_button = gr.Button("Refresh List")
         
-        output = gr.Textbox(label="Result", interactive=False)
+        output_convert_lora = gr.Textbox(label="Result", interactive=False)
         
         refresh_button.click(
             fn=update_checkbox_group,
@@ -1697,7 +1707,7 @@ with gr.Blocks(theme=theme) as demo:
         select_output_lora.change(
             fn=process_selection,
             inputs=select_output_lora,
-            outputs=output
+            outputs=output_convert_lora
         )
     
      # Adding Download Section
@@ -1759,8 +1769,9 @@ with gr.Blocks(theme=theme) as demo:
                            enable_wandb,
                            wandb_run_name,
                            wandb_tracker_name,
-                           wandb_api_key
-                           ):
+                           wandb_api_key,
+                           split_attn
+                        ):
         
         with process_lock:
             if process_dict:
@@ -1823,7 +1834,8 @@ with gr.Blocks(theme=theme) as demo:
             enable_wandb,
             wandb_run_name,
             wandb_tracker_name,
-            wandb_api_key
+            wandb_api_key,
+            split_attn
         )
         
         if pid:
@@ -1861,7 +1873,7 @@ with gr.Blocks(theme=theme) as demo:
             max_train_epochs, save_every, seed, fp8_base, enable_lowvram, blocks_to_swap,attention, general_batch_size, general_resolutions,
             general_enable_bucket, general_bucket_no_upscale, image_resolutions, image_batch_size,
             image_enable_bucket, image_bucket_no_upscale, video_resolutions, video_batch_size, target_frames,
-            frame_extraction, frame_stride, frame_sample, video_enable_bucket, video_bucket_no_upscale, enable_wandb, wandb_run_name, wandb_tracker_name, wandb_api_key
+            frame_extraction, frame_stride, frame_sample, video_enable_bucket, video_bucket_no_upscale, enable_wandb, wandb_run_name, wandb_tracker_name, wandb_api_key, split_attn
         ],
         outputs=[output, training_process_pid, train_button, stop_button],
         api_name=None
@@ -1905,33 +1917,54 @@ with gr.Blocks(theme=theme) as demo:
     )
     
     # Handle selecting an existing dataset
-    # existing_datasets.change(
-    #     fn=handle_select_existing,
-    #     inputs=existing_datasets,
-    #     outputs=[
-    #         dataset_path, 
-    #         config_dir, 
-    #         output_dir, 
-    #         upload_status, 
-    #         gallery,
-    #         # download_button,
-    #         download_status,
-    #         hidden_config 
-    #     ]
-    # ).then(
-    #     fn=lambda config_vals: update_ui_with_config(config_vals),
-    #     inputs=hidden_config,  # Receives configuration values
-    #     outputs=[
-    #         epochs, batch_size, lr, save_every, eval_every, rank, only_double_blocks, dtype,
-    #         transformer_path, vae_path, llm_path, clip_path, optimizer_type,
-    #         betas, weight_decay, eps, gradient_accumulation_steps, num_repeats,
-    #         resolutions_input, enable_ar_bucket, min_ar, max_ar, num_ar_buckets, ar_buckets,
-    #         frame_buckets, gradient_clipping, warmup_steps, eval_before_first_step,
-    #         eval_micro_batch_size_per_gpu, eval_gradient_accumulation_steps,
-    #         checkpoint_every_n_minutes, activation_checkpointing, partition_method,
-    #         save_dtype, caching_batch_size, steps_per_print, video_clip_mode
-    #     ]
-    # )
-    
+    existing_datasets.change(
+        fn=handle_select_existing,
+        inputs=existing_datasets,
+        outputs=[
+            dataset_path, 
+            config_dir, 
+            output_dir, 
+            upload_status, 
+            gallery,
+            # download_button,
+            download_status,
+            hidden_config 
+        ]
+    ).then(
+        fn=lambda config_vals: update_ui_with_config(config_vals),
+        inputs=hidden_config,  # Receives configuration values
+        outputs=[
+            # epochs, batch_size, lr, save_every, eval_every, rank, only_double_blocks, dtype,
+            # transformer_path, vae_path, llm_path, clip_path, optimizer_type,
+            # betas, weight_decay, eps, gradient_accumulation_steps, num_repeats,
+            # resolutions_input, enable_ar_bucket, min_ar, max_ar, num_ar_buckets, ar_buckets,
+            # frame_buckets, gradient_clipping, warmup_steps, eval_before_first_step,
+            # eval_micro_batch_size_per_gpu, eval_gradient_accumulation_steps,
+            # checkpoint_every_n_minutes, activation_checkpointing, partition_method,
+            # save_dtype, caching_batch_size, steps_per_print, video_clip_mode
+        ]
+    )
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Gradio Interface for LoRA Training on Hunyuan Video")
+
+    parser.add_argument("--local", action="store_true", help="Run the interface locally")
+
+    args = parser.parse_args()
+
+    return args
+
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=7860, allowed_paths=["/workspace", "."])
+    args = parse_args()
+    
+    if args.local:
+        MODEL_DIR = os.path.join(os.getcwd(), "models")
+        DATASET_DIR = os.path.join(os.getcwd(), "datasets")
+        OUTPUT_DIR = os.path.join(os.getcwd(), "outputs")
+        CONFIG_DIR = os.path.join(os.getcwd(), "configs")
+        
+    # Create directories if they don't exist
+    for dir_path in [MODEL_DIR, DATASET_DIR, OUTPUT_DIR, CONFIG_DIR]:
+        os.makedirs(dir_path, exist_ok=True)
+        
+    demo.launch(server_name="0.0.0.0", server_port=7860, allowed_paths=["/workspace", ".", os.getcwd()])

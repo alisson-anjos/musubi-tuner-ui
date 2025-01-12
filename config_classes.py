@@ -209,6 +209,7 @@ class TrainingConfig:
         enable_generate_samples: bool = False,
         sample_every_n_epochs: int = 1,
         sample_prompts: str = None,
+        split_attn: bool = False,
     ):
         self.dit_path = dit_path
         self.vae_path = vae_path
@@ -245,6 +246,7 @@ class TrainingConfig:
         self.enable_generate_samples = enable_generate_samples
         self.sample_every_n_epochs = sample_every_n_epochs
         self.sample_prompts = sample_prompts
+        self.split_attn = split_attn
 
     def generate_command(self) -> str:
         
@@ -282,12 +284,13 @@ class TrainingConfig:
             f"--save_every_n_epochs {self.save_every_n_epochs} ",
             f"--seed {self.seed} ",
             f"--logging_dir {self.log_dir} ",
-            f"--log_with \"all\" ",
+            f"--log_with \"all\" " if self.enable_wandb else "--log_with \"tensorboard\" ",
             f"--wandb_tracker_name {self.wandb_tracker_name} " if self.enable_wandb and self.wandb_tracker_name else "",
             f"--wandb_run_name {self.wandb_run_name} " if self.enable_wandb and self.wandb_run_name else "",
             f"--wandb_api_key {self.wandb_api_key} " if self.enable_wandb and self.wandb_api_key else "",
             f"--sample_every_n_epochs {self.sample_every_n_epochs}"  if self.enable_generate_samples and self.sample_every_n_epochs else "",
             f"--sample_prompts {self.sample_prompts} " if self.enable_generate_samples and self.sample_prompts else ""
+            f"--split_attn" if self.split_attn else "",
             f"--output_dir {self.output_dir} ",
             f"--output_name {self.output_name}",
         ]
@@ -299,6 +302,8 @@ class TrainingConfig:
       
       training_config = {
           "dit_path": self.dit_path,
+          "vae_path": self.vae_path,
+          "llm_path": self.llm_path,
           "dataset_config": self.dataset_config,
           "output_dir": self.output_dir,
           "output_name": self.output_name,
@@ -326,7 +331,8 @@ class TrainingConfig:
           "wandb_tracker_name": self.wandb_tracker_name,	
           "wandb_api_key": self.wandb_api_key,
           "sample_every_n_epochs": self.sample_every_n_epochs,
-          "sample_prompts": self.sample_prompts
+          "sample_prompts": self.sample_prompts,
+          "split_attn": self.split_attn,
       }
       
       training_config_file = f"training_command.toml"
