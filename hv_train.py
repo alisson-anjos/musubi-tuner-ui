@@ -24,8 +24,8 @@ import toml
 import torch
 from tqdm import tqdm
 from accelerate.utils import set_seed
-from accelerate import Accelerator, InitProcessGroupKwargs, DistributedDataParallelKwargs, PartialState
-from safetensors.torch import load_file
+from accelerate import Accelerator, InitProcessGroupKwargs, DistributedDataParallelKwargs
+from safetensors.torch import load_file, save_file
 import transformers
 from diffusers.optimization import (
     SchedulerType as DiffusersSchedulerType,
@@ -34,14 +34,13 @@ from diffusers.optimization import (
 from transformers.optimization import SchedulerType, TYPE_TO_SCHEDULER_FUNCTION
 
 from dataset import config_utils
-from hunyuan_model.models import load_transformer, get_rotary_pos_embed_by_shape, HYVideoDiffusionTransformer
+from hunyuan_model.models import load_transformer, get_rotary_pos_embed_by_shape
 import hunyuan_model.text_encoder as text_encoder_module
-from hunyuan_model.vae import load_vae, VAE_VER
+from hunyuan_model.vae import load_vae
 import hunyuan_model.vae as vae_module
 from modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 import networks.lora as lora_module
 from dataset.config_utils import BlueprintGenerator, ConfigSanitizer
-from hv_generate_video import save_images_grid, save_videos_grid
 
 import logging
 
@@ -53,19 +52,7 @@ logging.basicConfig(level=logging.INFO)
 
 BASE_MODEL_VERSION_HUNYUAN_VIDEO = "hunyuan_video"
 
-SS_METADATA_KEY_BASE_MODEL_VERSION = "ss_base_model_version"
-SS_METADATA_KEY_NETWORK_MODULE = "ss_network_module"
-SS_METADATA_KEY_NETWORK_DIM = "ss_network_dim"
-SS_METADATA_KEY_NETWORK_ALPHA = "ss_network_alpha"
-SS_METADATA_KEY_NETWORK_ARGS = "ss_network_args"
-
-SS_METADATA_MINIMUM_KEYS = [
-    SS_METADATA_KEY_BASE_MODEL_VERSION,
-    SS_METADATA_KEY_NETWORK_MODULE,
-    SS_METADATA_KEY_NETWORK_DIM,
-    SS_METADATA_KEY_NETWORK_ALPHA,
-    SS_METADATA_KEY_NETWORK_ARGS,
-]
+# TODO make separate file for some functions to commonize with other scripts
 
 
 def clean_memory_on_device(device: torch.device):
@@ -203,11 +190,6 @@ def line_to_prompt_dict(line: str) -> dict:
                 prompt_dict["sample_steps"] = max(1, min(1000, int(m.group(1))))
                 continue
 
-            m = re.match(r"g ([\d\.]+)", parg, re.IGNORECASE)
-            if m:  # scale
-                prompt_dict["guidance_scale"] = float(m.group(1))
-                continue
-
             # m = re.match(r"l ([\d\.]+)", parg, re.IGNORECASE)
             # if m:  # scale
             #     prompt_dict["scale"] = float(m.group(1))
@@ -237,8 +219,6 @@ def load_prompts(prompt_file: str) -> list[Dict]:
     elif prompt_file.endswith(".json"):
         with open(prompt_file, "r", encoding="utf-8") as f:
             prompts = json.load(f)
-    elif len(prompt_file) > 0:
-        prompts = prompt_file.replace("|", "\n")
 
     # preprocess prompts
     for i in range(len(prompts)):
@@ -315,264 +295,9 @@ def compute_loss_weighting_for_sd3(weighting_scheme: str, noise_scheduler, times
     return weighting
 
 
-def should_sample_images(args, steps, epoch=None):
-    if steps == 0:
-        if not args.sample_at_first:
-            return False
-    else:
-        should_sample_by_steps = args.sample_every_n_steps is not None and steps % args.sample_every_n_steps == 0
-        should_sample_by_epochs = (
-            args.sample_every_n_epochs is not None and epoch is not None and epoch % args.sample_every_n_epochs == 0
-        )
-        if not should_sample_by_steps and not should_sample_by_epochs:
-            return False
-    return True
-
-
-def sample_images(accelerator, args, epoch, steps, vae, transformer, sample_parameters, dit_dtype):
-    if not should_sample_images(args, steps, epoch):
-        return
-
-    logger.info("")
-    logger.info(f"generating sample images at step / サンプル画像生成 ステップ: {steps}")
-    if sample_parameters is None:
-        logger.error(f"No prompt file / プロンプトファイルがありません: {args.sample_prompts}")
-        return
-
-    distributed_state = PartialState()  # for multi gpu distributed inference. this is a singleton, so it's safe to use it here
-
-    # Use the unwrapped model
-    transformer: HYVideoDiffusionTransformer = accelerator.unwrap_model(transformer)
-    transformer.switch_block_swap_for_inference()
-
-    # Create a directory to save the samples
-    save_dir = args.output_dir + "/sample"
-    os.makedirs(save_dir, exist_ok=True)
-
-    # save random state to restore later
-    rng_state = torch.get_rng_state()
-    cuda_rng_state = None
-    try:
-        cuda_rng_state = torch.cuda.get_rng_state() if torch.cuda.is_available() else None
-    except Exception:
-        pass
-
-    if distributed_state.num_processes <= 1:
-        # If only one device is available, just use the original prompt list. We don't need to care about the distribution of prompts.
-        with torch.no_grad(), accelerator.autocast():
-            for sample_parameter in sample_parameters:
-                sample_image_inference(accelerator, args, transformer, dit_dtype, vae, save_dir, sample_parameter, epoch, steps)
-                clean_memory_on_device(accelerator.device)
-    else:
-        # Creating list with N elements, where each element is a list of prompt_dicts, and N is the number of processes available (number of devices available)
-        # prompt_dicts are assigned to lists based on order of processes, to attempt to time the image creation time to match enum order. Probably only works when steps and sampler are identical.
-        per_process_params = []  # list of lists
-        for i in range(distributed_state.num_processes):
-            per_process_params.append(sample_parameters[i :: distributed_state.num_processes])
-
-        with torch.no_grad():
-            with distributed_state.split_between_processes(per_process_params) as sample_parameter_lists:
-                for sample_parameter in sample_parameter_lists[0]:
-                    sample_image_inference(accelerator, args, transformer, dit_dtype, vae, save_dir, sample_parameter, epoch, steps)
-                    clean_memory_on_device(accelerator.device)
-
-    torch.set_rng_state(rng_state)
-    if cuda_rng_state is not None:
-        torch.cuda.set_rng_state(cuda_rng_state)
-
-    transformer.switch_block_swap_for_training()
-    clean_memory_on_device(accelerator.device)
-
-
-def sample_image_inference(accelerator, args, transformer, dit_dtype, vae, save_dir, sample_parameter, epoch, steps):
-    sample_steps = sample_parameter.get("sample_steps", 20)
-    width = sample_parameter.get("width", 256)  # make smaller for faster and memory saving inference
-    height = sample_parameter.get("height", 256)
-    frame_count = sample_parameter.get("frame_count", 1)
-    guidance_scale = sample_parameter.get("guidance_scale", 7.0)
-    seed = sample_parameter.get("seed")
-    prompt: str = sample_parameter.get("prompt", "")
-
-    # Calculate latent video length based on VAE version
-    if "884" in VAE_VER:
-        latent_video_length = (frame_count - 1) // 4 + 1
-    elif "888" in VAE_VER:
-        latent_video_length = (frame_count - 1) // 8 + 1
-    else:
-        latent_video_length = frame_count
-
-    device = accelerator.device
-    if seed is not None:
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed(seed)
-        generator = torch.Generator(device=device).manual_seed(seed)
-    else:
-        # True random sample image generation
-        torch.seed()
-        torch.cuda.seed()
-        generator = torch.Generator(device=device).manual_seed(torch.initial_seed())
-
-    logger.info(f"prompt: {prompt}")
-    logger.info(f"height: {height}")
-    logger.info(f"width: {width}")
-    logger.info(f"frame count: {frame_count}")
-    logger.info(f"sample steps: {sample_steps}")
-    logger.info(f"guidance scale: {guidance_scale}")
-    if seed is not None:
-        logger.info(f"seed: {seed}")
-
-    # Prepare scheduler for each prompt
-    scheduler = FlowMatchDiscreteScheduler(shift=args.discrete_flow_shift, reverse=True, solver="euler")
-
-    # Number of inference steps for sampling
-    scheduler.set_timesteps(sample_steps, device=device)
-    timesteps = scheduler.timesteps
-
-    # Get embeddings
-    prompt_embeds = sample_parameter["llm_embeds"].to(device=device, dtype=dit_dtype)
-    prompt_mask = sample_parameter["llm_mask"].to(device=device)
-    prompt_embeds_2 = sample_parameter["clipL_embeds"].to(device=device, dtype=dit_dtype)
-
-    num_channels_latents = 16  # transformer.config.in_channels
-    vae_scale_factor = 2 ** (4 - 1)  # Assuming 4 VAE blocks
-
-    # Initialize latents
-    shape_or_frame = (
-        1,
-        num_channels_latents,
-        1,
-        height // vae_scale_factor,
-        width // vae_scale_factor,
-    )
-    latents = []
-    for _ in range(latent_video_length):
-        latents.append(torch.randn(shape_or_frame, generator=generator, device=device, dtype=dit_dtype))
-    latents = torch.cat(latents, dim=2)
-
-    # Guidance scale
-    guidance_expand = torch.tensor([guidance_scale * 1000.0], dtype=torch.float32, device=device).to(dit_dtype)
-
-    # Get rotary positional embeddings
-    freqs_cos, freqs_sin = get_rotary_pos_embed_by_shape(transformer, latents.shape[2:])
-    freqs_cos = freqs_cos.to(device=device, dtype=dit_dtype)
-    freqs_sin = freqs_sin.to(device=device, dtype=dit_dtype)
-
-    # Wrap the inner loop with tqdm to track progress over timesteps
-    prompt_idx = sample_parameter.get("enum", 0)
-    with torch.no_grad():
-        for i, t in enumerate(tqdm(timesteps, desc=f"Sampling timesteps for prompt {prompt_idx+1}")):
-            latents = scheduler.scale_model_input(latents, t)
-            noise_pred = transformer(
-                latents,
-                t.repeat(latents.shape[0]).to(device=device, dtype=dit_dtype),
-                text_states=prompt_embeds,
-                text_mask=prompt_mask,
-                text_states_2=prompt_embeds_2,
-                freqs_cos=freqs_cos,
-                freqs_sin=freqs_sin,
-                guidance=guidance_expand,
-                return_dict=True,
-            )["x"]
-
-            # Compute the previous noisy sample x_t -> x_t-1
-            latents = scheduler.step(noise_pred, t, latents, return_dict=False)[0]
-
-    # Move VAE to the appropriate device for sampling
-    vae.to(device)
-    vae.eval()
-
-    # Decode latents to video
-    if hasattr(vae.config, "shift_factor") and vae.config.shift_factor:
-        latents = latents / vae.config.scaling_factor + vae.config.shift_factor
-    else:
-        latents = latents / vae.config.scaling_factor
-
-    latents = latents.to(device=device, dtype=vae.dtype)
-    with torch.no_grad():
-        video = vae.decode(latents, return_dict=False)[0]
-    video = (video / 2 + 0.5).clamp(0, 1)
-    video = video.cpu().float()
-
-    # Save video
-    ts_str = time.strftime("%Y%m%d%H%M%S", time.localtime())
-    num_suffix = f"e{epoch:06d}" if epoch is not None else f"{steps:06d}"
-    seed_suffix = "" if seed is None else f"_{seed}"
-    save_path = f"{'' if args.output_name is None else args.output_name + '_'}{num_suffix}_{prompt_idx:02d}_{ts_str}{seed_suffix}"
-    if video.shape[2] == 1:
-        save_images_grid(video, save_dir, save_path, create_subdir=False)
-    else:
-        save_videos_grid(video, os.path.join(save_dir, save_path) + ".mp4")
-
-    # Move models back to initial state
-    vae.to("cpu")
-
-
-class NetworkTrainer:
+class FineTuningTrainer:
     def __init__(self):
         pass
-
-    # TODO 他のスクリプトと共通化する
-    def generate_step_logs(
-        self,
-        args: argparse.Namespace,
-        current_loss,
-        avr_loss,
-        lr_scheduler,
-        lr_descriptions,
-        optimizer=None,
-        keys_scaled=None,
-        mean_norm=None,
-        maximum_norm=None,
-    ):
-        network_train_unet_only = True
-        logs = {"loss/current": current_loss, "loss/average": avr_loss}
-
-        if keys_scaled is not None:
-            logs["max_norm/keys_scaled"] = keys_scaled
-            logs["max_norm/average_key_norm"] = mean_norm
-            logs["max_norm/max_key_norm"] = maximum_norm
-
-        lrs = lr_scheduler.get_last_lr()
-        for i, lr in enumerate(lrs):
-            if lr_descriptions is not None:
-                lr_desc = lr_descriptions[i]
-            else:
-                idx = i - (0 if network_train_unet_only else -1)
-                if idx == -1:
-                    lr_desc = "textencoder"
-                else:
-                    if len(lrs) > 2:
-                        lr_desc = f"group{idx}"
-                    else:
-                        lr_desc = "unet"
-
-            logs[f"lr/{lr_desc}"] = lr
-
-            if args.optimizer_type.lower().startswith("DAdapt".lower()) or args.optimizer_type.lower() == "Prodigy".lower():
-                # tracking d*lr value
-                logs[f"lr/d*lr/{lr_desc}"] = (
-                    lr_scheduler.optimizers[-1].param_groups[i]["d"] * lr_scheduler.optimizers[-1].param_groups[i]["lr"]
-                )
-            if (
-                args.optimizer_type.lower().endswith("ProdigyPlusScheduleFree".lower()) and optimizer is not None
-            ):  # tracking d*lr value of unet.
-                logs["lr/d*lr"] = optimizer.param_groups[0]["d"] * optimizer.param_groups[0]["lr"]
-        else:
-            idx = 0
-            if not network_train_unet_only:
-                logs["lr/textencoder"] = float(lrs[0])
-                idx = 1
-
-            for i in range(idx, len(lrs)):
-                logs[f"lr/group{i}"] = float(lrs[i])
-                if args.optimizer_type.lower().startswith("DAdapt".lower()) or args.optimizer_type.lower() == "Prodigy".lower():
-                    logs[f"lr/d*lr/group{i}"] = (
-                        lr_scheduler.optimizers[-1].param_groups[i]["d"] * lr_scheduler.optimizers[-1].param_groups[i]["lr"]
-                    )
-                if args.optimizer_type.lower().endswith("ProdigyPlusScheduleFree".lower()) and optimizer is not None:
-                    logs[f"lr/d*lr/group{i}"] = optimizer.param_groups[i]["d"] * optimizer.param_groups[i]["lr"]
-
-        return logs
 
     def process_sample_prompts(
         self,
@@ -944,6 +669,9 @@ class NetworkTrainer:
 
         return True
 
+    def sample_images(self, accelerator, args, epoch, global_step, device, vae, transformer, sample_parameters):
+        pass
+
     def get_noisy_model_input_and_timesteps(
         self,
         args: argparse.Namespace,
@@ -1004,94 +732,7 @@ class NetworkTrainer:
 
         return noisy_model_input, timesteps
 
-    def show_timesteps(self, args: argparse.Namespace):
-        N_TRY = 100000
-        BATCH_SIZE = 1000
-        CONSOLE_WIDTH = 64
-        N_TIMESTEPS_PER_LINE = 25
-
-        noise_scheduler = FlowMatchDiscreteScheduler(shift=args.discrete_flow_shift, reverse=True, solver="euler")
-        # print(f"Noise scheduler timesteps: {noise_scheduler.timesteps}")
-
-        latents = torch.zeros(BATCH_SIZE, 1, 1, 1, 1, dtype=torch.float16)
-        noise = torch.ones_like(latents)
-
-        # sample timesteps
-        sampled_timesteps = [0] * noise_scheduler.config.num_train_timesteps
-        for i in tqdm(range(N_TRY // BATCH_SIZE)):
-            # we use noise=1, so retured noisy_model_input is same as timestep, because `noisy_model_input = (1 - t) * latents + t * noise`
-            actual_timesteps, _ = self.get_noisy_model_input_and_timesteps(
-                args, noise, latents, noise_scheduler, "cpu", torch.float16
-            )
-            actual_timesteps = actual_timesteps[:, 0, 0, 0, 0] * 1000
-            for t in actual_timesteps:
-                t = int(t.item())
-                sampled_timesteps[t] += 1
-
-        # sample weighting
-        sampled_weighting = [0] * noise_scheduler.config.num_train_timesteps
-        for i in tqdm(range(len(sampled_weighting))):
-            timesteps = torch.tensor([i + 1], device="cpu")
-            weighting = compute_loss_weighting_for_sd3(args.weighting_scheme, noise_scheduler, timesteps, "cpu", torch.float16)
-            if weighting is None:
-                weighting = torch.tensor(1.0, device="cpu")
-            elif torch.isinf(weighting).any():
-                weighting = torch.tensor(1.0, device="cpu")
-            sampled_weighting[i] = weighting.item()
-
-        # show results
-        if args.show_timesteps == "image":
-            # show timesteps with matplotlib
-            import matplotlib.pyplot as plt
-
-            plt.figure(figsize=(10, 5))
-            plt.subplot(1, 2, 1)
-            plt.bar(range(len(sampled_timesteps)), sampled_timesteps, width=1.0)
-            plt.title("Sampled timesteps")
-            plt.xlabel("Timestep")
-            plt.ylabel("Count")
-
-            plt.subplot(1, 2, 2)
-            plt.bar(range(len(sampled_weighting)), sampled_weighting, width=1.0)
-            plt.title("Sampled loss weighting")
-            plt.xlabel("Timestep")
-            plt.ylabel("Weighting")
-
-            plt.tight_layout()
-            plt.show()
-
-        else:
-            sampled_timesteps = np.array(sampled_timesteps)
-            sampled_weighting = np.array(sampled_weighting)
-
-            # average per line
-            sampled_timesteps = sampled_timesteps.reshape(-1, N_TIMESTEPS_PER_LINE).mean(axis=1)
-            sampled_weighting = sampled_weighting.reshape(-1, N_TIMESTEPS_PER_LINE).mean(axis=1)
-
-            max_count = max(sampled_timesteps)
-            print(f"Sampled timesteps: max count={max_count}")
-            for i, t in enumerate(sampled_timesteps):
-                line = f"{(i)*N_TIMESTEPS_PER_LINE:4d}-{(i+1)*N_TIMESTEPS_PER_LINE-1:4d}: "
-                line += "#" * int(t / max_count * CONSOLE_WIDTH)
-                print(line)
-
-            max_weighting = max(sampled_weighting)
-            print(f"Sampled loss weighting: max weighting={max_weighting}")
-            for i, w in enumerate(sampled_weighting):
-                line = f"{i*N_TIMESTEPS_PER_LINE:4d}-{(i+1)*N_TIMESTEPS_PER_LINE-1:4d}: {w:8.2f} "
-                line += "#" * int(w / max_weighting * CONSOLE_WIDTH)
-                print(line)
-
     def train(self, args):
-        # show timesteps for debugging
-        if args.show_timesteps:
-            self.show_timesteps(args)
-            return
-
-        session_id = random.randint(0, 2**32)
-        training_started_at = time.time()
-        # setup_logging(args, reset=True)
-
         if args.seed is None:
             args.seed = random.randint(0, 2**32)
         set_seed(args.seed)
@@ -1121,9 +762,6 @@ class NetworkTrainer:
             weight_dtype = torch.bfloat16
 
         # HunyuanVideo specific
-        dit_dtype = torch.bfloat16 if args.dit_dtype is None else model_utils.str_to_dtype(args.dit_dtype)
-        dit_weight_dtype = torch.float8_e4m3fn if args.fp8_base else dit_dtype
-        logger.info(f"DiT precision: {dit_dtype}, weight precision: {dit_weight_dtype}")
         vae_dtype = torch.float16 if args.vae_dtype is None else model_utils.str_to_dtype(args.vae_dtype)
 
         # get embedding for sampling images
@@ -1132,6 +770,7 @@ class NetworkTrainer:
             sample_parameters = self.process_sample_prompts(
                 args, accelerator, args.sample_prompts, args.text_encoder1, args.text_encoder2, args.fp8_llm
             )
+
             # Load VAE model for sampling images: VAE is loaded to cpu to save gpu memory
             vae, _, s_ratio, t_ratio = load_vae(vae_dtype=vae_dtype, device="cpu", vae_path=args.vae)
             vae.requires_grad_(False)
@@ -1164,9 +803,7 @@ class NetworkTrainer:
             raise ValueError(
                 f"either --sdpa, --flash-attn, --sage-attn or --xformers must be specified / --sdpa, --flash-attn, --sage-attn, --xformersのいずれかを指定してください"
             )
-        transformer = load_transformer(args.dit, attn_mode, args.split_attn, loading_device, dit_weight_dtype)
-        transformer.eval()
-        transformer.requires_grad_(False)
+        transformer = load_transformer(args.dit, attn_mode, args.split_attn, loading_device, None)  # load as is
 
         if blocks_to_swap > 0:
             logger.info(f"enable swap {blocks_to_swap} blocks to CPU from device: {accelerator.device}")
@@ -1176,72 +813,14 @@ class NetworkTrainer:
             logger.info("Enable offloading img_in and txt_in to CPU")
             transformer.enable_img_in_txt_in_offloading()
 
-        # load network model for differential training
-        sys.path.append(os.path.dirname(__file__))
-        accelerator.print("import network module:", args.network_module)
-        network_module: lora_module = importlib.import_module(args.network_module)  # actual module may be different
-
-        if args.base_weights is not None:
-            # if base_weights is specified, merge the weights to DiT model
-            for i, weight_path in enumerate(args.base_weights):
-                if args.base_weights_multiplier is None or len(args.base_weights_multiplier) <= i:
-                    multiplier = 1.0
-                else:
-                    multiplier = args.base_weights_multiplier[i]
-
-                accelerator.print(f"merging module: {weight_path} with multiplier {multiplier}")
-
-                weights_sd = load_file(weight_path)
-                module = network_module.create_network_from_weights_hunyuan_video(
-                    multiplier, weights_sd, unet=transformer, for_inference=True
-                )
-                module.merge_to(None, transformer, weights_sd, weight_dtype, "cpu")
-
-            accelerator.print(f"all weights merged: {', '.join(args.base_weights)}")
-
-        # prepare network
-        net_kwargs = {}
-        if args.network_args is not None:
-            for net_arg in args.network_args:
-                key, value = net_arg.split("=")
-                net_kwargs[key] = value
-
-        if args.dim_from_weights:
-            logger.info(f"Loading network from weights: {args.dim_from_weights}")
-            weights_sd = load_file(args.dim_from_weights)
-            network, _ = network_module.create_network_from_weights_hunyuan_video(1, weights_sd, unet=transformer)
-        else:
-            network = network_module.create_network_hunyuan_video(
-                1.0,
-                args.network_dim,
-                args.network_alpha,
-                vae,
-                None,
-                transformer,
-                neuron_dropout=args.network_dropout,
-                **net_kwargs,
-            )
-        if network is None:
-            return
-
-        network.prepare_network(args)
-
-        # apply network to DiT
-        network.apply_to(None, transformer, apply_text_encoder=False, apply_unet=True)
-
-        if args.network_weights is not None:
-            # FIXME consider alpha of weights: this assumes that the alpha is not changed
-            info = network.load_weights(args.network_weights)
-            accelerator.print(f"load network weights from {args.network_weights}: {info}")
-
         if args.gradient_checkpointing:
             transformer.enable_gradient_checkpointing()
-            network.enable_gradient_checkpointing()  # may have no effect
 
         # prepare optimizer, data loader etc.
         accelerator.print("prepare optimizer, data loader etc.")
 
-        trainable_params, lr_descriptions = network.prepare_optimizer_params(unet_lr=args.learning_rate)
+        trainable_params = list(transformer.parameters())
+        logger.info(f"number of trainable parameters: {sum(p.numel() for p in trainable_params)}")
         optimizer_name, optimizer_args, optimizer, optimizer_train_fn, optimizer_eval_fn = self.get_optimizer(
             args, trainable_params
         )
@@ -1278,26 +857,28 @@ class NetworkTrainer:
         # prepare training model. accelerator does some magic here
 
         # experimental feature: train the model with gradients in fp16/bf16
-        network_dtype = torch.float32
-        args.full_fp16 = args.full_bf16 = False  # temporary disabled because stochastic rounding is not supported yet
+        dit_dtype = torch.float32
         if args.full_fp16:
             assert (
                 args.mixed_precision == "fp16"
             ), "full_fp16 requires mixed precision='fp16' / full_fp16を使う場合はmixed_precision='fp16'を指定してください。"
             accelerator.print("enable full fp16 training.")
-            network_dtype = weight_dtype
-            network.to(network_dtype)
+            dit_weight_dtype = torch.float16
         elif args.full_bf16:
             assert (
                 args.mixed_precision == "bf16"
             ), "full_bf16 requires mixed precision='bf16' / full_bf16を使う場合はmixed_precision='bf16'を指定してください。"
             accelerator.print("enable full bf16 training.")
-            network_dtype = weight_dtype
-            network.to(network_dtype)
+            dit_weight_dtype = torch.bfloat16
+        else:
+            dit_weight_dtype = torch.float32
 
-        if dit_weight_dtype != dit_dtype:
-            logger.info(f"casting model to {dit_weight_dtype}")
-            transformer.to(dit_weight_dtype)
+        # TODO add fused optimizer and stochastic rounding
+
+        # cast model to dit_weight_dtype
+        # if dit_dtype != dit_weight_dtype:
+        logger.info(f"casting model to {dit_weight_dtype}")
+        transformer.to(dit_weight_dtype)
 
         if blocks_to_swap > 0:
             transformer = accelerator.prepare(transformer, device_placement=[not blocks_to_swap > 0])
@@ -1306,15 +887,9 @@ class NetworkTrainer:
         else:
             transformer = accelerator.prepare(transformer)
 
-        network, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(network, optimizer, train_dataloader, lr_scheduler)
-        training_model = network
+        optimizer, train_dataloader, lr_scheduler = accelerator.prepare(optimizer, train_dataloader, lr_scheduler)
 
-        if args.gradient_checkpointing:
-            transformer.train()
-        else:
-            transformer.eval()
-
-        accelerator.unwrap_model(network).prepare_grad_etc(transformer)
+        transformer.train()
 
         if args.full_fp16:
             # patch accelerator for fp16 training
@@ -1325,33 +900,6 @@ class NetworkTrainer:
                 return org_unscale_grads(optimizer, inv_scale, found_inf, True)
 
             accelerator.scaler._unscale_grads_ = _unscale_grads_replacer
-
-        # before resuming make hook for saving/loading to save/load the network weights only
-        def save_model_hook(models, weights, output_dir):
-            # pop weights of other models than network to save only network weights
-            # only main process or deepspeed https://github.com/huggingface/diffusers/issues/2606
-            if accelerator.is_main_process:  # or args.deepspeed:
-                remove_indices = []
-                for i, model in enumerate(models):
-                    if not isinstance(model, type(accelerator.unwrap_model(network))):
-                        remove_indices.append(i)
-                for i in reversed(remove_indices):
-                    if len(weights) > i:
-                        weights.pop(i)
-                # print(f"save model hook: {len(weights)} weights will be saved")
-
-        def load_model_hook(models, input_dir):
-            # remove models except network
-            remove_indices = []
-            for i, model in enumerate(models):
-                if not isinstance(model, type(accelerator.unwrap_model(network))):
-                    remove_indices.append(i)
-            for i in reversed(remove_indices):
-                models.pop(i)
-            # print(f"load model hook: {len(models)} models will be loaded")
-
-        accelerator.register_save_state_pre_hook(save_model_hook)
-        accelerator.register_load_state_pre_hook(load_model_hook)
 
         # resume from local or huggingface. accelerator.step is set
         self.resume_from_local_or_hf_if_specified(accelerator, args)  # accelerator.load_state(args.resume)
@@ -1374,88 +922,6 @@ class NetworkTrainer:
         accelerator.print(f"  gradient accumulation steps / 勾配を合計するステップ数 = {args.gradient_accumulation_steps}")
         accelerator.print(f"  total optimization steps / 学習ステップ数: {args.max_train_steps}")
 
-        # TODO refactor metadata creation and move to util
-        metadata = {
-            "ss_" "ss_session_id": session_id,  # random integer indicating which group of epochs the model came from
-            "ss_training_started_at": training_started_at,  # unix timestamp
-            "ss_output_name": args.output_name,
-            "ss_learning_rate": args.learning_rate,
-            "ss_num_train_items": train_dataset_group.num_train_items,
-            "ss_num_batches_per_epoch": len(train_dataloader),
-            "ss_num_epochs": num_train_epochs,
-            "ss_gradient_checkpointing": args.gradient_checkpointing,
-            "ss_gradient_accumulation_steps": args.gradient_accumulation_steps,
-            "ss_max_train_steps": args.max_train_steps,
-            "ss_lr_warmup_steps": args.lr_warmup_steps,
-            "ss_lr_scheduler": args.lr_scheduler,
-            SS_METADATA_KEY_BASE_MODEL_VERSION: BASE_MODEL_VERSION_HUNYUAN_VIDEO,
-            # "ss_network_module": args.network_module,
-            # "ss_network_dim": args.network_dim,  # None means default because another network than LoRA may have another default dim
-            # "ss_network_alpha": args.network_alpha,  # some networks may not have alpha
-            SS_METADATA_KEY_NETWORK_MODULE: args.network_module,
-            SS_METADATA_KEY_NETWORK_DIM: args.network_dim,
-            SS_METADATA_KEY_NETWORK_ALPHA: args.network_alpha,
-            "ss_network_dropout": args.network_dropout,  # some networks may not have dropout
-            "ss_mixed_precision": args.mixed_precision,
-            "ss_seed": args.seed,
-            "ss_training_comment": args.training_comment,  # will not be updated after training
-            # "ss_sd_scripts_commit_hash": train_util.get_git_revision_hash(),
-            "ss_optimizer": optimizer_name + (f"({optimizer_args})" if len(optimizer_args) > 0 else ""),
-            "ss_max_grad_norm": args.max_grad_norm,
-            "ss_fp8_base": bool(args.fp8_base),
-            "ss_fp8_llm": bool(args.fp8_llm),
-            "ss_full_fp16": bool(args.full_fp16),
-            "ss_full_bf16": bool(args.full_bf16),
-            "ss_weighting_scheme": args.weighting_scheme,
-            "ss_logit_mean": args.logit_mean,
-            "ss_logit_std": args.logit_std,
-            "ss_mode_scale": args.mode_scale,
-            "ss_guidance_scale": args.guidance_scale,
-            "ss_timestep_sampling": args.timestep_sampling,
-            "ss_sigmoid_scale": args.sigmoid_scale,
-            "ss_discrete_flow_shift": args.discrete_flow_shift,
-        }
-
-        datasets_metadata = []
-        # tag_frequency = {}  # merge tag frequency for metadata editor # TODO support tag frequency
-        for dataset in train_dataset_group.datasets:
-            dataset_metadata = dataset.get_metadata()
-            datasets_metadata.append(dataset_metadata)
-
-        metadata["ss_datasets"] = json.dumps(datasets_metadata)
-
-        # add extra args
-        if args.network_args:
-            # metadata["ss_network_args"] = json.dumps(net_kwargs)
-            metadata[SS_METADATA_KEY_NETWORK_ARGS] = json.dumps(net_kwargs)
-
-        # model name and hash
-        if args.dit is not None:
-            logger.info(f"calculate hash for DiT model: {args.dit}")
-            sd_model_name = args.dit
-            if os.path.exists(sd_model_name):
-                # metadata["ss_sd_model_hash"] = model_utils.model_hash(sd_model_name)
-                # metadata["ss_new_sd_model_hash"] = model_utils.calculate_sha256(sd_model_name)
-                sd_model_name = os.path.basename(sd_model_name)
-            metadata["ss_sd_model_name"] = sd_model_name
-
-        if args.vae is not None:
-            logger.info(f"calculate hash for VAE model: {args.vae}")
-            vae_name = args.vae
-            if os.path.exists(vae_name):
-                # metadata["ss_vae_hash"] = model_utils.model_hash(vae_name)
-                # metadata["ss_new_vae_hash"] = model_utils.calculate_sha256(vae_name)
-                vae_name = os.path.basename(vae_name)
-            metadata["ss_vae_name"] = vae_name
-
-        metadata = {k: str(v) for k, v in metadata.items()}
-
-        # make minimum metadata for filtering
-        minimum_metadata = {}
-        for key in SS_METADATA_MINIMUM_KEYS:
-            if key in metadata:
-                minimum_metadata[key] = metadata[key]
-
         if accelerator.is_main_process:
             init_kwargs = {}
             if args.wandb_run_name:
@@ -1463,7 +929,7 @@ class NetworkTrainer:
             if args.log_tracker_config is not None:
                 init_kwargs = toml.load(args.log_tracker_config)
             accelerator.init_trackers(
-                "network_train" if args.log_tracker_name is None else args.log_tracker_name,
+                "hunyuan_video_ft" if args.log_tracker_name is None else args.log_tracker_name,
                 config=train_utils.get_sanitized_config_or_none(args),
                 init_kwargs=init_kwargs,
             )
@@ -1479,18 +945,11 @@ class NetworkTrainer:
         del train_dataset_group
 
         # function for saving/removing
-        save_dtype = dit_dtype
-
         def save_model(ckpt_name: str, unwrapped_nw, steps, epoch_no, force_sync_upload=False):
             os.makedirs(args.output_dir, exist_ok=True)
             ckpt_file = os.path.join(args.output_dir, ckpt_name)
 
             accelerator.print(f"\nsaving checkpoint: {ckpt_file}")
-            metadata["ss_training_finished_at"] = str(time.time())
-            metadata["ss_steps"] = str(steps)
-            metadata["ss_epoch"] = str(epoch_no)
-
-            metadata_to_save = minimum_metadata if args.no_metadata else metadata
 
             title = args.metadata_title if args.metadata_title is not None else args.output_name
             if args.min_timestep is not None or args.max_timestep is not None:
@@ -1510,11 +969,10 @@ class NetworkTrainer:
                 args.metadata_license,
                 args.metadata_tags,
                 timesteps=md_timesteps,
+                is_lora=False,
             )
 
-            metadata_to_save.update(sai_metadata)
-
-            unwrapped_nw.save_weights(ckpt_file, save_dtype, metadata_to_save)
+            save_file(transformer.state_dict(), ckpt_name, sai_metadata)
             if args.huggingface_repo_id is not None:
                 huggingface_utils.upload(args, ckpt_file, "/" + ckpt_name, force_sync_upload=force_sync_upload)
 
@@ -1525,10 +983,9 @@ class NetworkTrainer:
                 os.remove(old_ckpt_file)
 
         # For --sample_at_first
-        if should_sample_images(args, global_step, epoch=0):
-            optimizer_eval_fn()
-            sample_images(accelerator, args, 0, global_step, vae, transformer, sample_parameters, dit_dtype)
-            optimizer_train_fn()
+        optimizer_eval_fn()
+        self.sample_images(accelerator, args, 0, global_step, accelerator.device, vae, transformer, sample_parameters)
+        optimizer_train_fn()
         if len(accelerator.trackers) > 0:
             # log empty object to commit the sample images to wandb
             accelerator.log({}, step=0)
@@ -1546,18 +1003,12 @@ class NetworkTrainer:
             accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
             current_epoch.value = epoch + 1
 
-            metadata["ss_epoch"] = str(epoch + 1)
-
-            accelerator.unwrap_model(network).on_epoch_start(transformer)
-
             for step, batch in enumerate(train_dataloader):
                 latents, llm_embeds, llm_mask, clip_embeds = batch
                 bsz = latents.shape[0]
                 current_step.value = global_step
 
-                with accelerator.accumulate(training_model):
-                    accelerator.unwrap_model(network).on_step_start()
-
+                with accelerator.accumulate(transformer):
                     latents = latents * vae_module.SCALING_FACTOR
 
                     # Sample noise that we'll add to the latents
@@ -1590,8 +1041,8 @@ class NetworkTrainer:
                         freqs_cos, freqs_sin = pos_embed_cache[pos_emb_shape]
 
                     # call DiT
-                    latents = latents.to(device=accelerator.device, dtype=network_dtype)
-                    noisy_model_input = noisy_model_input.to(device=accelerator.device, dtype=network_dtype)
+                    latents = latents.to(device=accelerator.device, dtype=dit_dtype)
+                    noisy_model_input = noisy_model_input.to(device=accelerator.device, dtype=dit_dtype)
                     # timesteps = timesteps.to(device=accelerator.device, dtype=dit_dtype)
                     # llm_embeds = llm_embeds.to(device=accelerator.device, dtype=dit_dtype)
                     # llm_mask = llm_mask.to(device=accelerator.device)
@@ -1612,7 +1063,7 @@ class NetworkTrainer:
                     # flow matching loss
                     target = noise - latents
 
-                    loss = torch.nn.functional.mse_loss(model_pred.to(network_dtype), target, reduction="none")
+                    loss = torch.nn.functional.mse_loss(model_pred.to(dit_dtype), target, reduction="none")
 
                     if weighting is not None:
                         loss = loss * weighting
@@ -1627,54 +1078,43 @@ class NetworkTrainer:
                         # self.all_reduce_network(accelerator, network)  # sync DDP grad manually
                         state = accelerate.PartialState()
                         if state.distributed_type != accelerate.DistributedType.NO:
-                            for param in network.parameters():
+                            for param in transformer.parameters():
                                 if param.grad is not None:
                                     param.grad = accelerator.reduce(param.grad, reduction="mean")
 
                         if args.max_grad_norm != 0.0:
-                            params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
+                            params_to_clip = accelerator.unwrap_model(transformer).parameters()
                             accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
                     optimizer.step()
                     lr_scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
 
-                if args.scale_weight_norms:
-                    keys_scaled, mean_norm, maximum_norm = accelerator.unwrap_model(network).apply_max_norm_regularization(
-                        args.scale_weight_norms, accelerator.device
-                    )
-                    max_mean_logs = {"Keys Scaled": keys_scaled, "Average key norm": mean_norm}
-                else:
-                    keys_scaled, mean_norm, maximum_norm = None, None, None
-
                 # Checks if the accelerator has performed an optimization step behind the scenes
                 if accelerator.sync_gradients:
                     progress_bar.update(1)
                     global_step += 1
 
-                    # to avoid calling optimizer_eval_fn() too frequently, we call it only when we need to sample images or save the model
-                    should_sampling = should_sample_images(args, global_step, epoch=None)
-                    should_saving = args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0
+                    optimizer_eval_fn()
+                    self.sample_images(
+                        accelerator, args, None, global_step, accelerator.device, vae, transformer, sample_parameters
+                    )
 
-                    if should_sampling or should_saving:
-                        optimizer_eval_fn()
-                        if should_sampling:
-                            sample_images(accelerator, args, None, global_step, vae, transformer, sample_parameters, dit_dtype)
+                    # 指定ステップごとにモデルを保存
+                    if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
+                        accelerator.wait_for_everyone()
+                        if accelerator.is_main_process:
+                            ckpt_name = train_utils.get_step_ckpt_name(args.output_name, global_step)
+                            save_model(ckpt_name, accelerator.unwrap_model(transformer), global_step, epoch)
 
-                        if should_saving:
-                            accelerator.wait_for_everyone()
-                            if accelerator.is_main_process:
-                                ckpt_name = train_utils.get_step_ckpt_name(args.output_name, global_step)
-                                save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
+                            if args.save_state:
+                                train_utils.save_and_remove_state_stepwise(args, accelerator, global_step)
 
-                                if args.save_state:
-                                    train_utils.save_and_remove_state_stepwise(args, accelerator, global_step)
-
-                                remove_step_no = train_utils.get_remove_step_no(args, global_step)
-                                if remove_step_no is not None:
-                                    remove_ckpt_name = train_utils.get_step_ckpt_name(args.output_name, remove_step_no)
-                                    remove_model(remove_ckpt_name)
-                        optimizer_train_fn()
+                            remove_step_no = train_utils.get_remove_step_no(args, global_step)
+                            if remove_step_no is not None:
+                                remove_ckpt_name = train_utils.get_step_ckpt_name(args.output_name, remove_step_no)
+                                remove_model(remove_ckpt_name)
+                    optimizer_train_fn()
 
                 current_loss = loss.detach().item()
                 loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
@@ -1682,13 +1122,8 @@ class NetworkTrainer:
                 logs = {"avr_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
                 progress_bar.set_postfix(**logs)
 
-                if args.scale_weight_norms:
-                    progress_bar.set_postfix(**{**max_mean_logs, **logs})
-
                 if len(accelerator.trackers) > 0:
-                    logs = self.generate_step_logs(
-                        args, current_loss, avr_loss, lr_scheduler, lr_descriptions, optimizer, keys_scaled, mean_norm, maximum_norm
-                    )
+                    logs = {"loss": current_loss, "lr": lr_scheduler.get_last_lr()[0]}
                     accelerator.log(logs, step=global_step)
 
                 if global_step >= args.max_train_steps:
@@ -1700,13 +1135,13 @@ class NetworkTrainer:
 
             accelerator.wait_for_everyone()
 
-            # save model at the end of epoch if needed
+            # 指定エポックごとにモデルを保存
             optimizer_eval_fn()
             if args.save_every_n_epochs is not None:
                 saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
                 if is_main_process and saving:
                     ckpt_name = train_utils.get_epoch_ckpt_name(args.output_name, epoch + 1)
-                    save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch + 1)
+                    save_model(ckpt_name, accelerator.unwrap_model(transformer), global_step, epoch + 1)
 
                     remove_epoch_no = train_utils.get_remove_epoch_no(args, epoch + 1)
                     if remove_epoch_no is not None:
@@ -1716,26 +1151,23 @@ class NetworkTrainer:
                     if args.save_state:
                         train_utils.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
 
-            sample_images(accelerator, args, epoch + 1, global_step, vae, transformer, sample_parameters, dit_dtype)
+            self.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, transformer, sample_parameters)
             optimizer_train_fn()
 
             # end of epoch
 
-        # metadata["ss_epoch"] = str(num_train_epochs)
-        metadata["ss_training_finished_at"] = str(time.time())
-
         if is_main_process:
-            network = accelerator.unwrap_model(network)
+            transformer = accelerator.unwrap_model(transformer)
 
         accelerator.end_training()
         optimizer_eval_fn()
 
-        if is_main_process and (args.save_state or args.save_state_on_train_end):
+        if args.save_state or args.save_state_on_train_end:
             train_utils.save_state_on_train_end(args, accelerator)
 
         if is_main_process:
             ckpt_name = train_utils.get_last_ckpt_name(args.output_name)
-            save_model(ckpt_name, network, global_step, num_train_epochs, force_sync_upload=True)
+            save_model(ckpt_name, transformer, global_step, num_train_epochs, force_sync_upload=True)
 
             logger.info("model saved.")
 
@@ -2014,9 +1446,8 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--text_encoder2", type=str, help="Text Encoder 2 directory / テキストエンコーダ2のディレクトリ")
     parser.add_argument("--text_encoder_dtype", type=str, default=None, help="data type for Text Encoder, default is float16")
     parser.add_argument("--fp8_llm", action="store_true", help="use fp8 for LLM / LLMにfp8を使う")
-    parser.add_argument("--fp8_base", action="store_true", help="use fp8 for base model / base modelにfp8を使う")
-    # parser.add_argument("--full_fp16", action="store_true", help="fp16 training including gradients / 勾配も含めてfp16で学習する")
-    # parser.add_argument("--full_bf16", action="store_true", help="bf16 training including gradients / 勾配も含めてbf16で学習する")
+    parser.add_argument("--full_fp16", action="store_true", help="fp16 training including gradients / 勾配も含めてfp16で学習する")
+    parser.add_argument("--full_bf16", action="store_true", help="bf16 training including gradients / 勾配も含めてbf16で学習する")
 
     parser.add_argument(
         "--blocks_to_swap",
@@ -2088,81 +1519,6 @@ def setup_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="set maximum time step for training (1~1000, default is 1000) / 学習時のtime stepの最大値を設定する（1~1000で指定、省略時はデフォルト値(1000)）",
-    )
-
-    parser.add_argument(
-        "--show_timesteps",
-        type=str,
-        default=None,
-        choices=["image", "console"],
-        help="show timesteps in image or console, and return to console / タイムステップを画像またはコンソールに表示し、コンソールに戻る",
-    )
-
-    # network settings
-    parser.add_argument(
-        "--no_metadata", action="store_true", help="do not save metadata in output model / メタデータを出力先モデルに保存しない"
-    )
-    parser.add_argument(
-        "--network_weights", type=str, default=None, help="pretrained weights for network / 学習するネットワークの初期重み"
-    )
-    parser.add_argument(
-        "--network_module", type=str, default=None, help="network module to train / 学習対象のネットワークのモジュール"
-    )
-    parser.add_argument(
-        "--network_dim",
-        type=int,
-        default=None,
-        help="network dimensions (depends on each network) / モジュールの次元数（ネットワークにより定義は異なります）",
-    )
-    parser.add_argument(
-        "--network_alpha",
-        type=float,
-        default=1,
-        help="alpha for LoRA weight scaling, default 1 (same as network_dim for same behavior as old version) / LoRaの重み調整のalpha値、デフォルト1（旧バージョンと同じ動作をするにはnetwork_dimと同じ値を指定）",
-    )
-    parser.add_argument(
-        "--network_dropout",
-        type=float,
-        default=None,
-        help="Drops neurons out of training every step (0 or None is default behavior (no dropout), 1 would drop all neurons) / 訓練時に毎ステップでニューロンをdropする（0またはNoneはdropoutなし、1は全ニューロンをdropout）",
-    )
-    parser.add_argument(
-        "--network_args",
-        type=str,
-        default=None,
-        nargs="*",
-        help="additional arguments for network (key=value) / ネットワークへの追加の引数",
-    )
-    parser.add_argument(
-        "--training_comment",
-        type=str,
-        default=None,
-        help="arbitrary comment string stored in metadata / メタデータに記録する任意のコメント文字列",
-    )
-    parser.add_argument(
-        "--dim_from_weights",
-        action="store_true",
-        help="automatically determine dim (rank) from network_weights / dim (rank)をnetwork_weightsで指定した重みから自動で決定する",
-    )
-    parser.add_argument(
-        "--scale_weight_norms",
-        type=float,
-        default=None,
-        help="Scale the weight of each key pair to help prevent overtraing via exploding gradients. (1 is a good starting point) / 重みの値をスケーリングして勾配爆発を防ぐ（1が初期値としては適当）",
-    )
-    parser.add_argument(
-        "--base_weights",
-        type=str,
-        default=None,
-        nargs="*",
-        help="network weights to merge into the model before training / 学習前にあらかじめモデルにマージするnetworkの重みファイル",
-    )
-    parser.add_argument(
-        "--base_weights_multiplier",
-        type=float,
-        default=None,
-        nargs="*",
-        help="multiplier for network weights to merge into the model before training / 学習前にあらかじめモデルにマージするnetworkの重みの倍率",
     )
 
     # save and load settings
@@ -2341,5 +1697,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
     args = read_config_from_file(args, parser)
 
-    trainer = NetworkTrainer()
+    trainer = FineTuningTrainer()
     trainer.train(args)

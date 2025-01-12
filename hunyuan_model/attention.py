@@ -9,10 +9,12 @@ try:
     import flash_attn
     from flash_attn.flash_attn_interface import _flash_attn_forward
     from flash_attn.flash_attn_interface import flash_attn_varlen_func
+    from flash_attn.flash_attn_interface import flash_attn_func
 except ImportError:
     flash_attn = None
     flash_attn_varlen_func = None
     _flash_attn_forward = None
+    flash_attn_func = None
 
 try:
     print(f"Trying to import sageattention")
@@ -26,14 +28,16 @@ except ImportError:
 
 try:
     import xformers.ops as xops
-    from xformers.ops import fmha
 except ImportError:
     xops = None
-    fmha = None
 
 MEMORY_LAYOUT = {
     "flash": (
         lambda x: x.view(x.shape[0] * x.shape[1], *x.shape[2:]),
+        lambda x: x,
+    ),
+    "flash_fixlen": (
+        lambda x: x,
         lambda x: x,
     ),
     "sageattn": (
@@ -128,6 +132,9 @@ def attention(
     split_attn = total_len is not None
     if split_attn and mode == "sageattn":
         mode = "sageattn_fixlen"
+    elif split_attn and mode == "flash":
+        mode = "flash_fixlen"
+    # print(f"Attention mode: {mode}, split_attn: {split_attn}")
     pre_attn_layout, post_attn_layout = MEMORY_LAYOUT[mode]
 
     # trim the sequence length to the actual length instead of attn_mask
@@ -174,11 +181,18 @@ def attention(
         del q, k, v
 
     elif mode == "flash":
-        assert not split_attn, "Flash attention does not support splitting"
         x = flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv)
         del q, k, v
         # x with shape [(bxs), a, d]
         x = x.view(batch_size, max_seqlen_q, x.shape[-2], x.shape[-1])  # reshape x to [b, s, a, d]
+    elif mode == "flash_fixlen":
+        x = []
+        for i in range(len(q)):
+            # q: (batch_size, seqlen, nheads, headdim), k: (batch_size, seqlen, nheads_k, headdim), v: (batch_size, seqlen, nheads_k, headdim)
+            x_i = flash_attn_func(q[i], k[i], v[i], dropout_p=drop_rate, causal=causal)
+            q[i], k[i], v[i] = None, None, None
+            x.append(x_i)
+        del q, k, v
     elif mode == "sageattn":
         x = sageattn_varlen(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv)
         del q, k, v

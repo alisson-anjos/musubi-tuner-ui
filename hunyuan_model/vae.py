@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO)
 
 
 SCALING_FACTOR = 0.476986
-VAE_VER = "884-16c-hy"
+VAE_VER = "884-16c-hy"  # We don't support other versions currently
 
 
 def load_vae(

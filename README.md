@@ -2,41 +2,88 @@
 
 [English](./README.md) | [日本語](./README.ja.md)
 
-This repository provides scripts for training LoRA (Low-Rank Adaptation) models with HunyuanVideo.
+## Table of Contents
 
-__This repository is under development.__
+- [Introduction](#introduction)
+  - [Releases](#releases)
+  - [Recent Updates](#recent-updates)
+- [Overview](#overview)
+    - [Hardware Requirements](#hardware-requirements)
+    - [Features](#features)
+- [Installation](#installation)
+- [Model Download](#model-download)
+    - [Use the Official HunyuanVideo Model](#use-the-official-hunyuanvideo-model)
+    - [Using ComfyUI Models for Text Encoder](#using-comfyui-models-for-text-encoder)
+- [Usage](#usage)
+    - [Dataset Configuration](#dataset-configuration)
+    - [Latent Pre-caching](#latent-pre-caching)
+    - [Text Encoder Output Pre-caching](#text-encoder-output-pre-caching)
+    - [Training](#training)
+    - [Inference](#inference)
+    - [Convert LoRA to another format](#convert-lora-to-another-format)
+- [Miscellaneous](#miscellaneous)
+    - [SageAttention Installation](#sageattention-installation)
+- [Disclaimer](#disclaimer)
+- [Contributing](#contributing)
+- [License](#license)
+
+## Introduction
+
+This repository provides scripts for training LoRA (Low-Rank Adaptation) models with HunyuanVideo. This repository is unofficial and not affiliated with the official HunyanVideo repository.
+
+*This repository is under development.*
 
 ### Recent Updates
 
-- 06, Jan, 2025
-    - Added `--split_attn` option to `hv_train_network.py` and `hv_generate_video.py` to process attention in chunks. Inference with SageAttention is expected to be about 10% faster. There is almost no impact during training. If `--split_attn` is not specified, it will be processed in the conventional way. Cannot be specified when `attn_mode` is `flash`.
+- Jan 12, 2025
+    - Sample image generation during training is now possible. Thanks to NSFW-API. Please refer to [this document](./docs/sampling_during_training.md) for details.
+    - You can now specify the number of repetitions for each dataset. The dataset is repeated the specified number of times, and the training is performed as one epoch. Specify `num_repeats` in the `.toml`. For details, please refer to [this document](./dataset/dataset_config.md).
+    - LoRA now excludes `img_mod` and `txt_mod` of double blocks and `modulation` of single blocks by default. According to reports from the community, this has improved the training results. You can change the target modules by specifying `exclude_patterns` and `include_patterns` with `--network_args`. For details, please refer to [this document](./docs/advanced_config.md). 
+        - If you are resuming training by specifying the previous weights with `--network_weights`, please specify `--network_args "include_patterns=[r'.*(img_mod|txt_mod|modulation).*']"`.
+    - LoRA+ is now available. Specify `loraplus_lr_ratio` in `--network_args`. For details, please refer to [this document](./docs/advanced_config.md).
 
-- 05, Jan, 2025
-    - Added `images` to the save format in `hv_generate_video.py`. You can generate images from latents saved with `--latent_path`. You can also specify multiple latents with `--latent_path` for batch processing (increases VRAM usage).
+- Jan 11, 2025
+    - Removed the hash values of the models to be trained (DiT, VAE) from the metadata saved in LoRA. The hash values are almost unused and take time to compute. If you encounter any issues, please let us know.
+    - I have released the weights of the DiT model converted to fp8 [here](https://huggingface.co/kohya-ss/HunyuanVideo-fp8_e4m3fn-unofficial). This can only be used when `--fp8_base` is specified. Download and specify the full path of `mp_rank_00_model_states_fp8.safetensors` to `--dit`. The initialization process at the start of training will be faster.
 
-- 04, Jan, 2025
-    - Added support for loading Text Encoder weights from .safetensors files. See [Model Download](#model-download) for instructions.
-    - Changed the format of latents saved by `hv_generate_video.py` to .safetensors. Metadata such as prompts will be saved in the .safetensors file. Use `--no_metadata` to disable saving metadata.
+- Jan 10, 2025
+    - Fixed a bug where `--split_attn` was applied even when not specified.
+    - xformers is now available for training and inference. `--split_attn` is required when using xformers.
+    - Fixed a bug in `flash` mode and confirmed operation. `--split_attn` can now be specified during inference for `flash` mode.
+    - A simple speed comparison during training showed that for training with 1280x720 resolution images, batch size=3, RTX 4090, and Windows 10, the order of speed was `flash` > `flash` + `--split_attn` == `xformers` + `--split_attn` > `sdpa` > `sdpa` + `--split_attn` (`flash` was the fastest).
+        - `sdpa` was about 12% slower than `flash`, and `xformers` + `--split_attn` was about 4% slower than `flash`.
+    - During inference, `flash` >= `sageattn` > `xformers` > `sdpa` (all with `--split_attn`). However, the speed difference between `sdpa` and `flash` is about 10%. Memory usage was almost the same.
 
-- 03, Jan, 2025: The noise initialization method during inference has changed. When the same seed is specified, the common frames will be the same even if the number of generated frames is different. Please note that the inference results will be different from before even with the same seed.
+- Jan 08, 2025
+    - __Important Update__: Fixed a bug where latents were scaled twice during caching and training. Please re-run `cache_latents.py` (without specifying `--skip_existing`) to re-cache latents.
 
-(For example, when 25 frames are specified, the time length of the latent is 7, and when 45 frames are specified, the time length of the latent is 12, but the first 7 frames of both will have the same noise value when the same seed is specified.)
+### Releases
+
+We are grateful to everyone who has been contributing to the Musubi Tuner ecosystem through documentation and third-party tools. To support these valuable contributions, we recommend working with our [releases](https://github.com/kohya-ss/musubi-tuner/releases) as stable reference points, as this project is under active development and breaking changes may occur.
+
+You can find the latest release and version history in our [releases page](https://github.com/kohya-ss/musubi-tuner/releases).
+
+## Overview
 
 ### Hardware Requirements
 
-- VRAM: 12GB or more recommended for image training, 24GB or more recommended for video training
-    - Depends on resolution, etc. For 12GB, use a resolution of 960x544 or lower and use memory-saving options such as `--blocks_to_swap`, `--fp8_llm`, etc.
+- VRAM: 12GB or more recommended for image training, 24GB or more for video training
+    - *Actual requirements depend on resolution and training settings.* For 12GB, use a resolution of 960x544 or lower and use memory-saving options such as `--blocks_to_swap`, `--fp8_llm`, etc.
 - Main Memory: 64GB or more recommended, 32GB + swap may work
 
 ### Features
 
 - Memory-efficient implementation
-- Windows compatible (Linux compatibility not yet verified)
+- Windows compatibility confirmed (Linux compatibility confirmed by community)
 - Multi-GPU support not implemented
 
 ## Installation
 
-Create a virtual environment and install PyTorch and torchvision matching your CUDA version. Verified to work with version 2.5.1.
+Python 3.10 or later is required (verified with 3.10).
+
+Create a virtual environment and install PyTorch and torchvision matching your CUDA version. 
+
+PyTorch 2.5.1 or later is required (see [note](#PyTorch-version)).
 
 ```bash
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
@@ -50,7 +97,10 @@ pip install -r requirements.txt
 
 Optionally, you can use FlashAttention and SageAttention (for inference only; see [SageAttention Installation](#sageattention-installation) for installation instructions).
 
-Additionally, install `ascii-magic` (used for dataset verification), `matplotlib` (used for timestep visualization), and `tensorboard` (used for logging training progress) as needed:
+Optional dependencies for additional features:
+- `ascii-magic`: Used for dataset verification
+- `matplotlib`: Used for timestep visualization
+- `tensorboard`: Used for logging training progress
 
 ```bash
 pip install ascii-magic matplotlib tensorboard
@@ -83,6 +133,8 @@ For DiT and VAE, use the HunyuanVideo models.
 From https://huggingface.co/tencent/HunyuanVideo/tree/main/hunyuan-video-t2v-720p/transformers, download [mp_rank_00_model_states.pt](https://huggingface.co/tencent/HunyuanVideo/resolve/main/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt) and place it in your chosen directory.
 
 (Note: The fp8 model on the same page is unverified.)
+
+If you are training with `--fp8_base`, you can use `mp_rank_00_model_states_fp8.safetensors` from [here](https://huggingface.co/kohya-ss/HunyuanVideo-fp8_e4m3fn-unofficial) instead of `mp_rank_00_model_states.pt`. (This file is unofficial and simply converts the weights to float8_e4m3fn.)
 
 From https://huggingface.co/tencent/HunyuanVideo/tree/main/hunyuan-video-t2v-720p/vae, download [pytorch_model.pt](https://huggingface.co/tencent/HunyuanVideo/resolve/main/hunyuan-video-t2v-720p/vae/pytorch_model.pt) and place it in your chosen directory.
 
@@ -134,9 +186,9 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 hv_trai
     --dataset_config path/to/toml --sdpa --mixed_precision bf16 --fp8_base 
     --optimizer_type adamw8bit --learning_rate 1e-3 --gradient_checkpointing 
      --max_data_loader_n_workers 2 --persistent_data_loader_workers 
-    --network_module=networks.lora --network_dim=32 
+    --network_module networks.lora --network_dim 32 
     --timestep_sampling sigmoid --discrete_flow_shift 1.0 
-    --max_train_epochs 16 --save_every_n_epochs=1 --seed 42
+    --max_train_epochs 16 --save_every_n_epochs 1 --seed 42
     --output_dir path/to/output_dir --output_name name-of-lora
 ```
 
@@ -148,13 +200,17 @@ If you're running low on VRAM, use `--blocks_to_swap` to offload some blocks to 
 
 (The idea of block swap is based on the implementation by 2kpr. Thanks again to 2kpr.)
 
-Use `--sdpa` for PyTorch's scaled dot product attention, or `--flash_attn` for FlashAttention (untested). `--sage_attn` uses SageAttention, but SageAttention is not yet supported for training and may not work correctly.
+Use `--sdpa` for PyTorch's scaled dot product attention. Use `--flash_attn` for [FlashAttention](https://github.com/Dao-AILab/flash-attention). Use `--xformers` for xformers, but specify `--split_attn` when using xformers. Use `--sage_attn` for SageAttention, but SageAttention is not yet supported for training and will not work correctly.
+
+`--split_attn` processes attention in chunks. Speed may be slightly reduced, but VRAM usage is slightly reduced.
 
 Sample video generation is not yet implemented.
 
 The format of LoRA trained is the same as `sd-scripts`.
 
 `--show_timesteps` can be set to `image` (requires `matplotlib`) or `console` to display timestep distribution and loss weighting during training.
+
+For sample image generation during training, refer to [this document](./docs/sampling_during_training.md). For advanced configuration, refer to [this document](./docs/advanced_config.md).
 
 Appropriate learning rates, training steps, timestep distribution, loss weighting, etc. are not yet known. Feedback is welcome.
 
@@ -179,9 +235,9 @@ Specifying `--fp8` runs DiT in fp8 mode. fp8 can significantly reduce memory con
 
 If you're running low on VRAM, use `--blocks_to_swap` to offload some blocks to CPU. Maximum value is 38.
 
-For `--attn_mode`, specify either `flash`, `torch`, `sageattn`, or `sdpa` (same as `torch`). These correspond to FlashAttention, scaled dot product attention, and SageAttention respectively. Default is `torch`. SageAttention is effective for VRAM reduction.
+For `--attn_mode`, specify either `flash`, `torch`, `sageattn`, `xformers`, or `sdpa` (same as `torch`). These correspond to FlashAttention, scaled dot product attention, SageAttention, and xformers, respectively. Default is `torch`. SageAttention is effective for VRAM reduction.
 
-Specifing `--split_attn` will process attention in chunks. Inference with SageAttention is expected to be about 10% faster. Cannot be specified when `attn_mode` is `flash`.
+Specifing `--split_attn` will process attention in chunks. Inference with SageAttention is expected to be about 10% faster.
 
 For `--output_type`, specify either `both`, `latent`, `video` or `images`. `both` outputs both latents and video. Recommended to use `both` in case of Out of Memory errors during VAE processing. You can specify saved latents with `--latent_path` and use `--output_type video` (or `images`) to only perform VAE decoding.
 
@@ -231,6 +287,11 @@ For reference, the build and installation instructions are as follows. You may n
 
 This completes the SageAttention installation.
 
+### PyTorch version
+
+If you specify `torch` for `--attn_mode`, use PyTorch 2.5.1 or later (earlier versions may result in black videos).
+
+If you use an earlier version, use xformers or SageAttention.
 
 ## Disclaimer
 
