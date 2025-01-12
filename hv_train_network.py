@@ -24,7 +24,7 @@ import toml
 import torch
 from tqdm import tqdm
 from accelerate.utils import set_seed
-from accelerate import Accelerator, InitProcessGroupKwargs, DistributedDataParallelKwargs
+from accelerate import Accelerator, InitProcessGroupKwargs, DistributedDataParallelKwargs, PartialState
 from safetensors.torch import load_file
 import transformers
 from diffusers.optimization import (
@@ -34,13 +34,14 @@ from diffusers.optimization import (
 from transformers.optimization import SchedulerType, TYPE_TO_SCHEDULER_FUNCTION
 
 from dataset import config_utils
-from hunyuan_model.models import load_transformer, get_rotary_pos_embed_by_shape
+from hunyuan_model.models import load_transformer, get_rotary_pos_embed_by_shape, HYVideoDiffusionTransformer
 import hunyuan_model.text_encoder as text_encoder_module
-from hunyuan_model.vae import load_vae
+from hunyuan_model.vae import load_vae, VAE_VER
 import hunyuan_model.vae as vae_module
 from modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 import networks.lora as lora_module
 from dataset.config_utils import BlueprintGenerator, ConfigSanitizer
+from hv_generate_video import save_images_grid, save_videos_grid
 
 import logging
 
@@ -202,6 +203,11 @@ def line_to_prompt_dict(line: str) -> dict:
                 prompt_dict["sample_steps"] = max(1, min(1000, int(m.group(1))))
                 continue
 
+            m = re.match(r"g ([\d\.]+)", parg, re.IGNORECASE)
+            if m:  # scale
+                prompt_dict["guidance_scale"] = float(m.group(1))
+                continue
+
             # m = re.match(r"l ([\d\.]+)", parg, re.IGNORECASE)
             # if m:  # scale
             #     prompt_dict["scale"] = float(m.group(1))
@@ -307,6 +313,198 @@ def compute_loss_weighting_for_sd3(weighting_scheme: str, noise_scheduler, times
     else:
         weighting = None  # torch.ones_like(sigmas)
     return weighting
+
+
+def should_sample_images(args, steps, epoch=None):
+    if steps == 0:
+        if not args.sample_at_first:
+            return False
+    else:
+        should_sample_by_steps = args.sample_every_n_steps is not None and steps % args.sample_every_n_steps == 0
+        should_sample_by_epochs = (
+            args.sample_every_n_epochs is not None and epoch is not None and epoch % args.sample_every_n_epochs == 0
+        )
+        if not should_sample_by_steps and not should_sample_by_epochs:
+            return False
+    return True
+
+
+def sample_images(accelerator, args, epoch, steps, vae, transformer, sample_parameters, dit_dtype):
+    if not should_sample_images(args, steps, epoch):
+        return
+
+    logger.info("")
+    logger.info(f"generating sample images at step / サンプル画像生成 ステップ: {steps}")
+    if sample_parameters is None:
+        logger.error(f"No prompt file / プロンプトファイルがありません: {args.sample_prompts}")
+        return
+
+    distributed_state = PartialState()  # for multi gpu distributed inference. this is a singleton, so it's safe to use it here
+
+    # Use the unwrapped model
+    transformer: HYVideoDiffusionTransformer = accelerator.unwrap_model(transformer)
+    transformer.switch_block_swap_for_inference()
+
+    # Create a directory to save the samples
+    save_dir = args.output_dir + "/sample"
+    os.makedirs(save_dir, exist_ok=True)
+
+    # save random state to restore later
+    rng_state = torch.get_rng_state()
+    cuda_rng_state = None
+    try:
+        cuda_rng_state = torch.cuda.get_rng_state() if torch.cuda.is_available() else None
+    except Exception:
+        pass
+
+    if distributed_state.num_processes <= 1:
+        # If only one device is available, just use the original prompt list. We don't need to care about the distribution of prompts.
+        with torch.no_grad(), accelerator.autocast():
+            for sample_parameter in sample_parameters:
+                sample_image_inference(accelerator, args, transformer, dit_dtype, vae, save_dir, sample_parameter, epoch, steps)
+                clean_memory_on_device(accelerator.device)
+    else:
+        # Creating list with N elements, where each element is a list of prompt_dicts, and N is the number of processes available (number of devices available)
+        # prompt_dicts are assigned to lists based on order of processes, to attempt to time the image creation time to match enum order. Probably only works when steps and sampler are identical.
+        per_process_params = []  # list of lists
+        for i in range(distributed_state.num_processes):
+            per_process_params.append(sample_parameters[i :: distributed_state.num_processes])
+
+        with torch.no_grad():
+            with distributed_state.split_between_processes(per_process_params) as sample_parameter_lists:
+                for sample_parameter in sample_parameter_lists[0]:
+                    sample_image_inference(accelerator, args, transformer, dit_dtype, vae, save_dir, sample_parameter, epoch, steps)
+                    clean_memory_on_device(accelerator.device)
+
+    torch.set_rng_state(rng_state)
+    if cuda_rng_state is not None:
+        torch.cuda.set_rng_state(cuda_rng_state)
+
+    transformer.switch_block_swap_for_training()
+    clean_memory_on_device(accelerator.device)
+
+
+def sample_image_inference(accelerator, args, transformer, dit_dtype, vae, save_dir, sample_parameter, epoch, steps):
+    sample_steps = sample_parameter.get("sample_steps", 20)
+    width = sample_parameter.get("width", 256)  # make smaller for faster and memory saving inference
+    height = sample_parameter.get("height", 256)
+    frame_count = sample_parameter.get("frame_count", 1)
+    guidance_scale = sample_parameter.get("guidance_scale", 7.0)
+    seed = sample_parameter.get("seed")
+    prompt: str = sample_parameter.get("prompt", "")
+
+    # Calculate latent video length based on VAE version
+    if "884" in VAE_VER:
+        latent_video_length = (frame_count - 1) // 4 + 1
+    elif "888" in VAE_VER:
+        latent_video_length = (frame_count - 1) // 8 + 1
+    else:
+        latent_video_length = frame_count
+
+    device = accelerator.device
+    if seed is not None:
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+        generator = torch.Generator(device=device).manual_seed(seed)
+    else:
+        # True random sample image generation
+        torch.seed()
+        torch.cuda.seed()
+        generator = torch.Generator(device=device).manual_seed(torch.initial_seed())
+
+    logger.info(f"prompt: {prompt}")
+    logger.info(f"height: {height}")
+    logger.info(f"width: {width}")
+    logger.info(f"frame count: {frame_count}")
+    logger.info(f"sample steps: {sample_steps}")
+    logger.info(f"guidance scale: {guidance_scale}")
+    if seed is not None:
+        logger.info(f"seed: {seed}")
+
+    # Prepare scheduler for each prompt
+    scheduler = FlowMatchDiscreteScheduler(shift=args.discrete_flow_shift, reverse=True, solver="euler")
+
+    # Number of inference steps for sampling
+    scheduler.set_timesteps(sample_steps, device=device)
+    timesteps = scheduler.timesteps
+
+    # Get embeddings
+    prompt_embeds = sample_parameter["llm_embeds"].to(device=device, dtype=dit_dtype)
+    prompt_mask = sample_parameter["llm_mask"].to(device=device)
+    prompt_embeds_2 = sample_parameter["clipL_embeds"].to(device=device, dtype=dit_dtype)
+
+    num_channels_latents = 16  # transformer.config.in_channels
+    vae_scale_factor = 2 ** (4 - 1)  # Assuming 4 VAE blocks
+
+    # Initialize latents
+    shape_or_frame = (
+        1,
+        num_channels_latents,
+        1,
+        height // vae_scale_factor,
+        width // vae_scale_factor,
+    )
+    latents = []
+    for _ in range(latent_video_length):
+        latents.append(torch.randn(shape_or_frame, generator=generator, device=device, dtype=dit_dtype))
+    latents = torch.cat(latents, dim=2)
+
+    # Guidance scale
+    guidance_expand = torch.tensor([guidance_scale * 1000.0], dtype=torch.float32, device=device).to(dit_dtype)
+
+    # Get rotary positional embeddings
+    freqs_cos, freqs_sin = get_rotary_pos_embed_by_shape(transformer, latents.shape[2:])
+    freqs_cos = freqs_cos.to(device=device, dtype=dit_dtype)
+    freqs_sin = freqs_sin.to(device=device, dtype=dit_dtype)
+
+    # Wrap the inner loop with tqdm to track progress over timesteps
+    prompt_idx = sample_parameter.get("enum", 0)
+    with torch.no_grad():
+        for i, t in enumerate(tqdm(timesteps, desc=f"Sampling timesteps for prompt {prompt_idx+1}")):
+            latents = scheduler.scale_model_input(latents, t)
+            noise_pred = transformer(
+                latents,
+                t.repeat(latents.shape[0]).to(device=device, dtype=dit_dtype),
+                text_states=prompt_embeds,
+                text_mask=prompt_mask,
+                text_states_2=prompt_embeds_2,
+                freqs_cos=freqs_cos,
+                freqs_sin=freqs_sin,
+                guidance=guidance_expand,
+                return_dict=True,
+            )["x"]
+
+            # Compute the previous noisy sample x_t -> x_t-1
+            latents = scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+
+    # Move VAE to the appropriate device for sampling
+    vae.to(device)
+    vae.eval()
+
+    # Decode latents to video
+    if hasattr(vae.config, "shift_factor") and vae.config.shift_factor:
+        latents = latents / vae.config.scaling_factor + vae.config.shift_factor
+    else:
+        latents = latents / vae.config.scaling_factor
+
+    latents = latents.to(device=device, dtype=vae.dtype)
+    with torch.no_grad():
+        video = vae.decode(latents, return_dict=False)[0]
+    video = (video / 2 + 0.5).clamp(0, 1)
+    video = video.cpu().float()
+
+    # Save video
+    ts_str = time.strftime("%Y%m%d%H%M%S", time.localtime())
+    num_suffix = f"e{epoch:06d}" if epoch is not None else f"{steps:06d}"
+    seed_suffix = "" if seed is None else f"_{seed}"
+    save_path = f"{'' if args.output_name is None else args.output_name + '_'}{num_suffix}_{prompt_idx:02d}_{ts_str}{seed_suffix}"
+    if video.shape[2] == 1:
+        save_images_grid(video, save_dir, save_path, create_subdir=False)
+    else:
+        save_videos_grid(video, os.path.join(save_dir, save_path) + ".mp4")
+
+    # Move models back to initial state
+    vae.to("cpu")
 
 
 class NetworkTrainer:
@@ -746,9 +944,6 @@ class NetworkTrainer:
 
         return True
 
-    def sample_images(self, accelerator, args, epoch, global_step, device, vae, transformer, sample_parameters):
-        pass
-
     def get_noisy_model_input_and_timesteps(
         self,
         args: argparse.Namespace,
@@ -937,7 +1132,6 @@ class NetworkTrainer:
             sample_parameters = self.process_sample_prompts(
                 args, accelerator, args.sample_prompts, args.text_encoder1, args.text_encoder2, args.fp8_llm
             )
-
             # Load VAE model for sampling images: VAE is loaded to cpu to save gpu memory
             vae, _, s_ratio, t_ratio = load_vae(vae_dtype=vae_dtype, device="cpu", vae_path=args.vae)
             vae.requires_grad_(False)
@@ -1240,8 +1434,8 @@ class NetworkTrainer:
             logger.info(f"calculate hash for DiT model: {args.dit}")
             sd_model_name = args.dit
             if os.path.exists(sd_model_name):
-                metadata["ss_sd_model_hash"] = model_utils.model_hash(sd_model_name)
-                metadata["ss_new_sd_model_hash"] = model_utils.calculate_sha256(sd_model_name)
+                # metadata["ss_sd_model_hash"] = model_utils.model_hash(sd_model_name)
+                # metadata["ss_new_sd_model_hash"] = model_utils.calculate_sha256(sd_model_name)
                 sd_model_name = os.path.basename(sd_model_name)
             metadata["ss_sd_model_name"] = sd_model_name
 
@@ -1249,8 +1443,8 @@ class NetworkTrainer:
             logger.info(f"calculate hash for VAE model: {args.vae}")
             vae_name = args.vae
             if os.path.exists(vae_name):
-                metadata["ss_vae_hash"] = model_utils.model_hash(vae_name)
-                metadata["ss_new_vae_hash"] = model_utils.calculate_sha256(vae_name)
+                # metadata["ss_vae_hash"] = model_utils.model_hash(vae_name)
+                # metadata["ss_new_vae_hash"] = model_utils.calculate_sha256(vae_name)
                 vae_name = os.path.basename(vae_name)
             metadata["ss_vae_name"] = vae_name
 
@@ -1331,9 +1525,10 @@ class NetworkTrainer:
                 os.remove(old_ckpt_file)
 
         # For --sample_at_first
-        optimizer_eval_fn()
-        self.sample_images(accelerator, args, 0, global_step, accelerator.device, vae, transformer, sample_parameters)
-        optimizer_train_fn()
+        if should_sample_images(args, global_step, epoch=0):
+            optimizer_eval_fn()
+            sample_images(accelerator, args, 0, global_step, vae, transformer, sample_parameters, dit_dtype)
+            optimizer_train_fn()
         if len(accelerator.trackers) > 0:
             # log empty object to commit the sample images to wandb
             accelerator.log({}, step=0)
@@ -1457,26 +1652,29 @@ class NetworkTrainer:
                     progress_bar.update(1)
                     global_step += 1
 
-                    optimizer_eval_fn()
-                    self.sample_images(
-                        accelerator, args, None, global_step, accelerator.device, vae, transformer, sample_parameters
-                    )
+                    # to avoid calling optimizer_eval_fn() too frequently, we call it only when we need to sample images or save the model
+                    should_sampling = should_sample_images(args, global_step, epoch=None)
+                    should_saving = args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0
 
-                    # 指定ステップごとにモデルを保存
-                    if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
-                        accelerator.wait_for_everyone()
-                        if accelerator.is_main_process:
-                            ckpt_name = train_utils.get_step_ckpt_name(args.output_name, global_step)
-                            save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
+                    if should_sampling or should_saving:
+                        optimizer_eval_fn()
+                        if should_sampling:
+                            sample_images(accelerator, args, None, global_step, vae, transformer, sample_parameters, dit_dtype)
 
-                            if args.save_state:
-                                train_utils.save_and_remove_state_stepwise(args, accelerator, global_step)
+                        if should_saving:
+                            accelerator.wait_for_everyone()
+                            if accelerator.is_main_process:
+                                ckpt_name = train_utils.get_step_ckpt_name(args.output_name, global_step)
+                                save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
 
-                            remove_step_no = train_utils.get_remove_step_no(args, global_step)
-                            if remove_step_no is not None:
-                                remove_ckpt_name = train_utils.get_step_ckpt_name(args.output_name, remove_step_no)
-                                remove_model(remove_ckpt_name)
-                    optimizer_train_fn()
+                                if args.save_state:
+                                    train_utils.save_and_remove_state_stepwise(args, accelerator, global_step)
+
+                                remove_step_no = train_utils.get_remove_step_no(args, global_step)
+                                if remove_step_no is not None:
+                                    remove_ckpt_name = train_utils.get_step_ckpt_name(args.output_name, remove_step_no)
+                                    remove_model(remove_ckpt_name)
+                        optimizer_train_fn()
 
                 current_loss = loss.detach().item()
                 loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
@@ -1502,7 +1700,7 @@ class NetworkTrainer:
 
             accelerator.wait_for_everyone()
 
-            # 指定エポックごとにモデルを保存
+            # save model at the end of epoch if needed
             optimizer_eval_fn()
             if args.save_every_n_epochs is not None:
                 saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
@@ -1518,7 +1716,7 @@ class NetworkTrainer:
                     if args.save_state:
                         train_utils.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
 
-            self.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, transformer, sample_parameters)
+            sample_images(accelerator, args, epoch + 1, global_step, vae, transformer, sample_parameters, dit_dtype)
             optimizer_train_fn()
 
             # end of epoch

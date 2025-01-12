@@ -114,7 +114,7 @@ def save_videos_grid(videos: torch.Tensor, path: str, rescale=False, n_rows=1, f
     container.close()
 
 
-def save_images_grid(videos: torch.Tensor, parent_dir: str, image_name: str, rescale: bool = False, n_rows: int = 1):
+def save_images_grid(videos: torch.Tensor, parent_dir: str, image_name: str, rescale: bool = False, n_rows: int = 1, create_subdir=True):
     videos = rearrange(videos, "b c t h w -> t b c h w")
     outputs = []
     for x in videos:
@@ -126,7 +126,11 @@ def save_images_grid(videos: torch.Tensor, parent_dir: str, image_name: str, res
         x = (x * 255).numpy().astype(np.uint8)
         outputs.append(x)
 
-    output_dir = os.path.join(parent_dir, image_name)
+    if create_subdir:
+        output_dir = os.path.join(parent_dir, image_name)
+    else:
+        output_dir = parent_dir
+
     os.makedirs(output_dir, exist_ok=True)
     for i, x in enumerate(outputs):
         image_path = os.path.join(output_dir, f"{image_name}_{i:03d}.png")
@@ -565,7 +569,7 @@ def main():
             guidance_expand = guidance_expand.to(device=device, dtype=dit_dtype)
         else:
             guidance_expand = None
-        freqs_cos, freqs_sin = get_rotary_pos_embed(vae.VAE_VER, transformer, video_length, height, width)
+        freqs_cos, freqs_sin = get_rotary_pos_embed(vae_ver, transformer, video_length, height, width)
         # n_tokens = freqs_cos.shape[0]
 
         # move and cast all inputs to the correct device and dtype
