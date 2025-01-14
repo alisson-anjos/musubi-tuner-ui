@@ -340,7 +340,7 @@ def decode_latents(args, latents, device):
     with torch.no_grad():
         image = vae.decode(latents, return_dict=False)[0]
 
-    if expand_temporal_dim or image.shape[2] == 1:
+    if expand_temporal_dim:
         image = image.squeeze(2)
 
     image = (image / 2 + 0.5).clamp(0, 1)
@@ -366,6 +366,7 @@ def parse_args():
     parser.add_argument("--prompt", type=str, required=True, help="prompt for generation")
     parser.add_argument("--video_size", type=int, nargs=2, default=[256, 256], help="video size")
     parser.add_argument("--video_length", type=int, default=129, help="video length")
+    parser.add_argument("--fps", type=int, default=24, help="video fps")
     parser.add_argument("--infer_steps", type=int, default=50, help="number of inference steps")
     parser.add_argument("--save_path", type=str, required=True, help="path to save generated video")
     parser.add_argument("--seed", type=int, default=None, help="Seed for evaluation.")
@@ -648,7 +649,7 @@ def main():
             original_name = "" if original_base_names is None else f"_{original_base_names[i]}"
             sample = sample.unsqueeze(0)
             video_path = f"{save_path}/{time_flag}_{i}_{seeds[i]}{original_name}.mp4"
-            save_videos_grid(sample, video_path, fps=24)
+            save_videos_grid(sample, video_path, fps=args.fps)
             logger.info(f"Sample save to: {video_path}")
     elif output_type == "images":
         # save images

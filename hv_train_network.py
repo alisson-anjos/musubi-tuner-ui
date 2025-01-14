@@ -208,6 +208,11 @@ def line_to_prompt_dict(line: str) -> dict:
                 prompt_dict["guidance_scale"] = float(m.group(1))
                 continue
 
+            m = re.match(r"fs ([\d\.]+)", parg, re.IGNORECASE)
+            if m:  # scale
+                prompt_dict["discrete_flow_shift"] = float(m.group(1))
+                continue
+
             # m = re.match(r"l ([\d\.]+)", parg, re.IGNORECASE)
             # if m:  # scale
             #     prompt_dict["scale"] = float(m.group(1))
@@ -389,7 +394,8 @@ def sample_image_inference(accelerator, args, transformer, dit_dtype, vae, save_
     width = sample_parameter.get("width", 256)  # make smaller for faster and memory saving inference
     height = sample_parameter.get("height", 256)
     frame_count = sample_parameter.get("frame_count", 1)
-    guidance_scale = sample_parameter.get("guidance_scale", 7.0)
+    guidance_scale = sample_parameter.get("guidance_scale", 6.0)
+    discrete_flow_shift = sample_parameter.get("discrete_flow_shift", 14.5)
     seed = sample_parameter.get("seed")
     prompt: str = sample_parameter.get("prompt", "")
 
@@ -418,11 +424,12 @@ def sample_image_inference(accelerator, args, transformer, dit_dtype, vae, save_
     logger.info(f"frame count: {frame_count}")
     logger.info(f"sample steps: {sample_steps}")
     logger.info(f"guidance scale: {guidance_scale}")
+    logger.info(f"discrete flow shift: {discrete_flow_shift}")
     if seed is not None:
         logger.info(f"seed: {seed}")
 
     # Prepare scheduler for each prompt
-    scheduler = FlowMatchDiscreteScheduler(shift=args.discrete_flow_shift, reverse=True, solver="euler")
+    scheduler = FlowMatchDiscreteScheduler(shift=discrete_flow_shift, reverse=True, solver="euler")
 
     # Number of inference steps for sampling
     scheduler.set_timesteps(sample_steps, device=device)
@@ -1211,20 +1218,32 @@ class NetworkTrainer:
             weights_sd = load_file(args.dim_from_weights)
             network, _ = network_module.create_network_from_weights_hunyuan_video(1, weights_sd, unet=transformer)
         else:
-            network = network_module.create_network_hunyuan_video(
-                1.0,
-                args.network_dim,
-                args.network_alpha,
-                vae,
-                None,
-                transformer,
-                neuron_dropout=args.network_dropout,
-                **net_kwargs,
-            )
+            if hasattr(network_module, 'create_network_hunyuan_video'):
+                network = network_module.create_network_hunyuan_video(
+                    1.0,
+                    args.network_dim,
+                    args.network_alpha,
+                    vae,
+                    None,
+                    transformer,
+                    neuron_dropout=args.network_dropout,
+                    **net_kwargs,
+                )
+            else:
+                network = network_module.create_network(
+                    1.0,
+                    args.network_dim,
+                    args.network_alpha,
+                    vae,
+                    None,
+                    transformer,
+                    **net_kwargs,
+                )
         if network is None:
             return
 
-        network.prepare_network(args)
+        if hasattr(network_module, 'prepare_network'):
+            network.prepare_network(args)
 
         # apply network to DiT
         network.apply_to(None, transformer, apply_text_encoder=False, apply_unet=True)

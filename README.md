@@ -35,6 +35,10 @@ This repository provides scripts for training LoRA (Low-Rank Adaptation) models 
 
 ### Recent Updates
 
+- Jan 13, 2025
+    - Changed the settings for sample image/video generation to address the issue of blurry sample images/videos during training. For details, please refer to [this document](./docs/sampling_during_training.md).
+        - You need to set the discrete flow shift and guidance scale correctly during inference, but the training settings were used as they were, causing this issue. We have set default values, which should improve the situation. You can specify the discrete flow shift with `--fs` and the guidance scale with `--g`.
+
 - Jan 12, 2025
     - Sample image generation during training is now possible. Thanks to NSFW-API. Please refer to [this document](./docs/sampling_during_training.md) for details.
     - You can now specify the number of repetitions for each dataset. The dataset is repeated the specified number of times, and the training is performed as one epoch. Specify `num_repeats` in the `.toml`. For details, please refer to [this document](./dataset/dataset_config.md).
