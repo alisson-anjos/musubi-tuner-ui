@@ -5,8 +5,8 @@
 ## Table of Contents
 
 - [Introduction](#introduction)
-  - [Releases](#releases)
   - [Recent Updates](#recent-updates)
+  - [Releases](#releases)
 - [Overview](#overview)
     - [Hardware Requirements](#hardware-requirements)
     - [Features](#features)
@@ -34,6 +34,9 @@ This repository provides scripts for training LoRA (Low-Rank Adaptation) models 
 *This repository is under development.*
 
 ### Recent Updates
+
+- Jan 14, 2025
+    - Added a temporary `--save_merged_model` option to `hv_generate_video.py` to save the DiT model after LoRA merge. For details, please refer to [Inference](#inference).
 
 - Jan 13, 2025
     - Changed the settings for sample image/video generation to address the issue of blurry sample images/videos during training. For details, please refer to [this document](./docs/sampling_during_training.md).
@@ -248,6 +251,10 @@ For `--output_type`, specify either `both`, `latent`, `video` or `images`. `both
 `--seed` is optional. A random seed will be used if not specified.
 
 `--video_length` should be specified as "a multiple of 4 plus 1".
+
+`--flow_shift` can be specified to shift the timestep (discrete flow shift). The default value when omitted is 7.0, which is the recommended value for 50 inference steps. In the HunyuanVideo paper, 7.0 is recommended for 50 steps, and 17.0 is recommended for less than 20 steps (e.g. 10).
+
+- You can save the DiT model after LoRA merge with the `--save_merged_model` option. Specify `--save_merged_model path/to/merged_model.safetensors`. Note that inference will not be performed when this option is specified.
 
 ### Convert LoRA to another format
 

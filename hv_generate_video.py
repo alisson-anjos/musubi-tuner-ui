@@ -28,6 +28,7 @@ from hunyuan_model.models import load_transformer, get_rotary_pos_embed
 from modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 from networks import lora
 from utils.model_utils import str_to_dtype
+from utils.safetensors_utils import mem_eff_save_file
 
 import logging
 
@@ -114,7 +115,9 @@ def save_videos_grid(videos: torch.Tensor, path: str, rescale=False, n_rows=1, f
     container.close()
 
 
-def save_images_grid(videos: torch.Tensor, parent_dir: str, image_name: str, rescale: bool = False, n_rows: int = 1, create_subdir=True):
+def save_images_grid(
+    videos: torch.Tensor, parent_dir: str, image_name: str, rescale: bool = False, n_rows: int = 1, create_subdir=True
+):
     videos = rearrange(videos, "b c t h w -> t b c h w")
     outputs = []
     for x in videos:
@@ -362,7 +365,14 @@ def parse_args():
     # LoRA
     parser.add_argument("--lora_weight", type=str, nargs="*", required=False, default=None, help="LoRA weight path")
     parser.add_argument("--lora_multiplier", type=float, nargs="*", default=1.0, help="LoRA multiplier")
+    parser.add_argument(
+        "--save_merged_model",
+        type=str,
+        default=None,
+        help="Save merged model to path. If specified, no inference will be performed.",
+    )
 
+    # inference
     parser.add_argument("--prompt", type=str, required=True, help="prompt for generation")
     parser.add_argument("--video_size", type=int, nargs=2, default=[256, 256], help="video size")
     parser.add_argument("--video_length", type=int, default=129, help="video length")
@@ -471,11 +481,15 @@ def main():
 
         # load DiT model
         blocks_to_swap = args.blocks_to_swap if args.blocks_to_swap else 0
-        loading_device = "cpu" if blocks_to_swap > 0 else device
+        loading_device = "cpu" # if blocks_to_swap > 0 else device
 
         logger.info(f"Loading DiT model from {args.dit}")
         if args.attn_mode == "sdpa":
             args.attn_mode = "torch"
+        
+        # if we use LoRA, weigths should be bf16 instead of fp8, because merging should be done in bf16
+        # the model is too large, so we load the model to cpu. in addition, the .pt file is loaded to cpu anyway
+        # on the fly merging will be a solution for this issue for .safetenors files
         transformer = load_transformer(args.dit, args.attn_mode, args.split_attn, loading_device, dit_dtype)
         transformer.eval()
 
@@ -498,6 +512,13 @@ def main():
                 synchronize_device(device)
 
                 logger.info("LoRA weights loaded")
+
+            # save model here before casting to dit_weight_dtype
+            if args.save_merged_model:
+                logger.info(f"Saving merged model to {args.save_merged_model}")
+                mem_eff_save_file(transformer.state_dict(), args.save_merged_model)  # save_file needs a lot of memory
+                logger.info("Merged model saved")
+                return
 
         if blocks_to_swap > 0:
             logger.info(f"Casting model to {dit_weight_dtype}")
