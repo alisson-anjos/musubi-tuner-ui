@@ -818,9 +818,21 @@ class FineTuningTrainer:
 
         # prepare optimizer, data loader etc.
         accelerator.print("prepare optimizer, data loader etc.")
+        
+        transformer.requires_grad_(False)
+        if accelerator.is_main_process:
+            accelerator.print(
+                f"Trainable modules '{args.trainable_modules}'."
+            )
+        for name, param in transformer.named_parameters():
+            for trainable_module_name in args.trainable_modules:
+                if trainable_module_name in name:
+                    param.requires_grad = True
+                    break
 
-        trainable_params = list(transformer.parameters())
-        logger.info(f"number of trainable parameters: {sum(p.numel() for p in trainable_params)}")
+        total_params = list(transformer.parameters())
+        trainable_params = list(filter(lambda p: p.requires_grad, transformer.parameters()))
+        logger.info(f"number of trainable parameters: {sum(p.numel() for p in trainable_params) / 1e6} M, total paramters: {sum(p.numel() for p in total_params) / 1e6} M")
         optimizer_name, optimizer_args, optimizer, optimizer_train_fn, optimizer_eval_fn = self.get_optimizer(
             args, trainable_params
         )
@@ -1266,6 +1278,12 @@ def setup_parser() -> argparse.ArgumentParser:
         default="no",
         choices=["no", "fp16", "bf16"],
         help="use mixed precision / 混合精度を使う場合、その精度",
+    )
+    parser.add_argument(
+        "--trainable_modules",
+        nargs='+', 
+        default=".",
+        help='Enter a list of trainable modules'
     )
 
     parser.add_argument(
