@@ -221,6 +221,16 @@ For sample image generation during training, refer to [this document](./docs/sam
 
 Appropriate learning rates, training steps, timestep distribution, loss weighting, etc. are not yet known. Feedback is welcome.
 
+### Merging LoRA Weights
+```bash
+python merge_lora.py \
+    --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt \
+    --lora_weight path/to/lora.safetensors \
+    --save_merged_model path/to/merged_model.safetensors \
+    --device cpu \
+    --lora_multiplier 1.0
+```
+
 ### Inference
 
 Generate videos using the following command:

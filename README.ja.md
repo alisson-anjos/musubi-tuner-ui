@@ -216,6 +216,16 @@ VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブ�
 
 適切な学習率、学習ステップ数、timestepsの分布、loss weightingなどのパラメータは、現時点ではわかっていません。情報提供をお待ちしています。
 
+### LoRAウェイトのマージ
+```bash
+python merge_lora.py \
+    --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt \
+    --lora_weight path/to/lora.safetensors \
+    --save_merged_model path/to/merged_model.safetensors \
+    --device cpu \
+    --lora_multiplier 1.0
+```
+
 ### 推論
 
 以下のコマンドを使用して動画を生成します。
