@@ -294,10 +294,13 @@ def load_video(
     start_frame: Optional[int] = None,
     end_frame: Optional[int] = None,
     bucket_selector: Optional[BucketSelector] = None,
+    bucket_reso: Optional[tuple[int, int]] = None,
 ) -> list[np.ndarray]:
+    """
+    bucket_reso: if given, resize the video to the bucket resolution, (width, height)
+    """
     container = av.open(video_path)
     video = []
-    bucket_reso = None
     for i, frame in enumerate(container.decode(video=0)):
         if start_frame is not None and i < start_frame:
             continue
@@ -771,7 +774,23 @@ class BaseDataset(torch.utils.data.Dataset):
         }
         return metadata
 
+    def get_all_latent_cache_files(self):
+        return glob.glob(os.path.join(self.cache_directory, f"*_{ARCHITECTURE_HUNYUAN_VIDEO}.safetensors"))
+
+    def get_all_text_encoder_output_cache_files(self):
+        return glob.glob(os.path.join(self.cache_directory, f"*_{ARCHITECTURE_HUNYUAN_VIDEO}_te.safetensors"))
+
     def get_latent_cache_path(self, item_info: ItemInfo) -> str:
+        """
+        Returns the cache path for the latent tensor.
+
+        item_info: ItemInfo object
+
+        Returns:
+            str: cache path
+
+        cache_path is based on the item_key and the resolution.
+        """
         w, h = item_info.original_size
         basename = os.path.splitext(os.path.basename(item_info.item_key))[0]
         assert self.cache_directory is not None, "cache_directory is required / cache_directoryは必須です"

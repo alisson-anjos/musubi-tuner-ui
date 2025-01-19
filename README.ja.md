@@ -19,6 +19,7 @@
     - [latentの事前キャッシュ](#latentの事前キャッシュ)
     - [Text Encoder出力の事前キャッシュ](#Text-Encoder出力の事前キャッシュ)
     - [学習](#学習)
+    - [LoRAの重みのマージ](#LoRAの重みのマージ)
     - [推論](#推論)
     - [LoRAの形式の変換](#LoRAの形式の変換)
 - [その他](#その他)
@@ -35,34 +36,24 @@
 
 ### 最近の更新
 
+- 2025/01/19
+    - latentとText Encoder出力の事前キャッシュ時に、データセットに含まれないキャッシュファイルを自動で消去するようにしました。これにより予期しないファイルが残り、学習に使用されてしまう問題が解消されます。
+        - `--keep_cache`で今までと同様にキャッシュファイルを残すことができます。
+    - Text Encoder出力の事前キャッシュ時に、`--skip_existing`を指定すると正しく動作しない問題を修正しました。
+
+- 2025/01/18
+    - `hv_generate_video.py`でvideo2videoの推論が可能になりました。詳細は[推論](#推論)を参照してください。
+
+- 2025/01/16
+    - LoRAの重みをマージするスクリプト、`merge_lora.py`が追加されました。PR [#37](https://github.com/kohya-ss/musubi-tuner/pull/37) kaykyr氏に感謝いたします。詳細は[LoRAの重みのマージ](#LoRAの重みのマージ)を参照してください。
+    - サンプルの学習設定を、学習率を2e-4に、`--timestep_sampling`を`shift`に、`--discrete_flow_shift`を7.0に変更しました。より高速な学習が期待されます。詳細は[学習](#学習)を参照してください。
+
 - 2025/01/14
     - `hv_generate_video.py`に、LoRAマージ後のDiTモデルを保存する`--save_merged_model`オプションを暫定的に追加しました。詳細は[推論](#推論)を参照してください。
 
 - 2025/01/13
     - 学習中のサンプル画像（動画）がぼやける現象に対応するため、サンプル生成時の設定を変更しました。詳細は[こちら](./docs/sampling_during_training.md)をご参照ください。
         - 推論時にdiscrete flow shiftとguidance scaleを正しく設定する必要がありますが、学習時の設定がそのまま使われていたため、この事象が発生していました。デフォルト値を設定したため、改善されると思われます。また`--fs`でdiscrete flow shiftを、`--g`でguidance scaleを指定できます。
-
-- 2025/01/12
-    - 学習中のサンプル画像生成が可能になりました。NSFW-API氏に感謝いたします。詳細は[こちらのドキュメント](./docs/sampling_during_training.md)を参照してください。
-    - データセットごとに繰り返し回数を指定できるようになりました。指定した数だけデータセットを繰り返し、1 epochとして学習します。`.toml`に`num_repeats`を指定してください。詳細は[こちらのドキュメント](./dataset/dataset_config.md)を参照してください。
-    - LoRAの適用対象モジュールから、double blocksの`img_mod`および`txt_mod`、single blocksの`modulation`をデフォルトで除外するようにしました。コミュニティからの報告によると、これにより学習結果が改善されるようです。`--network_args`で`exclude_patterns`および`include_patterns`を指定して、適用対象モジュールを変更できます。詳細は[こちらのドキュメント](./docs/advanced_config.md)を参照してください。
-        - 以前の重みを`--network_weights`で指定して学習を再開する場合、お手数ですが `--network_args "include_patterns=[r'.*(img_mod|txt_mod|modulation).*']"`を指定してください。
-    - LoRA+についてもそちらのドキュメントに追加しました。
-
-- 2025/01/11
-    - LoRAのメタデータに保存されていた、学習対象モデル（DiT、VAE）のハッシュ値を削除しました。ハッシュ値はほぼ使用されておらず、計算に時間が掛かるためです。もし問題があればご連絡ください。
-    - fp8に変換したDiTモデルの重みを[こちら](https://huggingface.co/kohya-ss/HunyuanVideo-fp8_e4m3fn-unofficial)で公開しました。`--fp8_base`指定時のみ使用可能です。ダウンロードして、`--dit`に`mp_rank_00_model_states_fp8.safetensors`のフルパスを指定してください。学習開始時の初期化処理が速くなります。
-
-- 2025/01/10
-    - `--split_attn`を指定しない場合でも、`--split_attn`が適用された状態になっていた不具合を修正しました。
-    - 学習および推論でxformersが利用可能になりました。xformers利用時は`--split_attn`の指定が必要です。
-    - `flash`モードでの不具合を修正し、動作を確認しました。また推論時に、`--split_attn`を指定可能にしました。
-    - 学習時の簡易な速度比較を行うと、1280x720解像度の画像による学習、batch size=3、RTX 4090、Windows 10の環境では、`flash`  > `flash` + `--split_attn` == `xformers` + `--split_attn` > `sdpa` > `sdpa` + `--split_attn` となりました（`flash`が最も高速）。
-        - `sdpa`は`flash`より12%程度遅く、`xformers` + `--split_attn`は`flash`より4%程度遅いようです。
-    - 推論時は `flash` >= `sageattn` > `xformers` > `sdpa` となりました（いずれも`--split_attn`を指定）。ただし、`sdpa`と`flash`の速度差は10%程度です。またメモリ使用量はほぼ同じでした。
-
-- 2025/01/08
-    - __重要な更新__：latentsがキャッシュ時と学習時の二回、scalingされる不具合を修正しました。お手数ですが、cache_latents.pyを（`--skip_existing`を指定せずに）再度実行して、latentsを再キャッシュしてください。
 
 ### リリースについて
 
@@ -164,6 +155,8 @@ VRAMが足りない場合は、`--vae_spatial_tile_sample_min_size`を128程度�
 
 `--debug_mode image` を指定するとデータセットの画像とキャプションが新規ウィンドウに表示されます。`--debug_mode console`でコンソールに表示されます（`ascii-magic`が必要）。
 
+デフォルトではデータセットに含まれないキャッシュファイルは自動的に削除されます。`--keep_cache`を指定すると、キャッシュファイルを残すことができます。
+
 ### Text Encoder出力の事前キャッシュ
 
 Text Encoder出力の事前キャッシュは必須です。以下のコマンドを使用して、事前キャッシュを作成してください。
@@ -178,6 +171,8 @@ python cache_text_encoder_outputs.py --dataset_config path/to/toml  --text_encod
 
 VRAMが足りない場合（16GB程度未満の場合）は、`--fp8_llm`を指定して、fp8でLLMを実行してください。
 
+デフォルトではデータセットに含まれないキャッシュファイルは自動的に削除されます。`--keep_cache`を指定すると、キャッシュファイルを残すことができます。
+
 ### 学習
 
 以下のコマンドを使用して、学習を開始します（実際には一行で入力してください）。
@@ -186,13 +181,17 @@ VRAMが足りない場合（16GB程度未満の場合）は、`--fp8_llm`を指�
 accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 hv_train_network.py 
     --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt 
     --dataset_config path/to/toml --sdpa --mixed_precision bf16 --fp8_base 
-    --optimizer_type adamw8bit --learning_rate 1e-3 --gradient_checkpointing 
-     --max_data_loader_n_workers 2 --persistent_data_loader_workers 
+    --optimizer_type adamw8bit --learning_rate 2e-4 --gradient_checkpointing 
+    --max_data_loader_n_workers 2 --persistent_data_loader_workers 
     --network_module networks.lora --network_dim 32 
-    --timestep_sampling sigmoid --discrete_flow_shift 1.0 
+    --timestep_sampling shift --discrete_flow_shift 7.0 
     --max_train_epochs 16 --save_every_n_epochs 1 --seed 42
     --output_dir path/to/output_dir --output_name name-of-lora
 ```
+
+__更新__：サンプルの学習率を1e-3から2e-4に、`--timestep_sampling`を`sigmoid`から`shift`に、`--discrete_flow_shift`を1.0から7.0に変更しました。より高速な学習が期待されます。ディテールが甘くなる場合は、discrete flow shiftを3.0程度に下げてみてください。
+
+ただ、適切な学習率、学習ステップ数、timestepsの分布、loss weightingなどのパラメータは、以前として不明な点が数多くあります。情報提供をお待ちしています。
 
 その他のオプションは`python hv_train_network.py --help`で確認できます（ただし多くのオプションは動作未確認です）。
 
@@ -206,17 +205,14 @@ VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブ�
 
 `--split_attn`を指定すると、attentionを分割して処理します。速度が多少低下しますが、VRAM使用量はわずかに減ります。
 
-サンプル動画生成は現時点では実装されていません。
-
 学習されるLoRAの形式は、`sd-scripts`と同じです。
 
 `--show_timesteps`に`image`（`matplotlib`が必要）または`console`を指定すると、学習時のtimestepsの分布とtimestepsごとのloss weightingが確認できます。
 
 学習中のサンプル画像生成については、[こちらのドキュメント](./docs/sampling_during_training.md)を参照してください。その他の高度な設定については[こちらのドキュメント](./docs/advanced_config.md)を参照してください。
 
-適切な学習率、学習ステップ数、timestepsの分布、loss weightingなどのパラメータは、現時点ではわかっていません。情報提供をお待ちしています。
+### LoRAの重みのマージ
 
-### LoRAウェイトのマージ
 ```bash
 python merge_lora.py \
     --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt \
@@ -225,6 +221,10 @@ python merge_lora.py \
     --device cpu \
     --lora_multiplier 1.0
 ```
+
+`--device`には計算を行うデバイス（`cpu`または`cuda`等）を指定してください。`cuda`を指定すると計算が高速化されます。
+
+`--lora_weight`にはマージするLoRAの重みを、`--lora_multiplier`にはLoRAの重みの係数を、それぞれ指定してください。複数個が指定可能で、両者の数は一致させてください。
 
 ### 推論
 
@@ -258,6 +258,10 @@ VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブ�
 `--video_length`は「4の倍数+1」を指定してください。
 
 `--flow_shift`にタイムステップのシフト値（discrete flow shift）を指定可能です。省略時のデフォルト値は7.0で、これは推論ステップ数が50の時の推奨値です。HunyuanVideoの論文では、ステップ数50の場合は7.0、ステップ数20未満（10など）で17.0が推奨されています。
+
+`--video_path`に読み込む動画を指定すると、video2videoの推論が可能です。動画ファイルを指定するか、複数の画像ファイルが入ったディレクトリを指定してください（画像ファイルはファイル名でソートされ、各フレームとして用いられます）。`--video_length`よりも短い動画を指定するとエラーになります。`--strength`で強度を指定できます。0~1.0で指定でき、大きいほど元の動画からの変化が大きくなります。
+
+なおvideo2video推論の処理は実験的なものです。
 
 `--save_merged_model`オプションで、LoRAマージ後のDiTモデルを保存できます。`--save_merged_model path/to/merged_model.safetensors`のように指定してください。なおこのオプションを指定すると推論は行われません。
 

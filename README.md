@@ -19,6 +19,7 @@
     - [Latent Pre-caching](#latent-pre-caching)
     - [Text Encoder Output Pre-caching](#text-encoder-output-pre-caching)
     - [Training](#training)
+    - [Merging LoRA Weights](#merging-lora-weights)
     - [Inference](#inference)
     - [Convert LoRA to another format](#convert-lora-to-another-format)
 - [Miscellaneous](#miscellaneous)
@@ -35,34 +36,24 @@ This repository provides scripts for training LoRA (Low-Rank Adaptation) models 
 
 ### Recent Updates
 
+- Jan 19, 2025
+    - When pre-caching latents and Text Encoder outputs, files not included in the dataset are automatically deleted. This prevents unexpected files from being left behind and used in training.
+        - You can still keep cache files as before by specifying `--keep_cache`.
+    - Fixed an issue where specifying `--skip_existing` during pre-caching of Text Encoder outputs did not work correctly.
+
+- Jan 18, 2025
+    - Video2video inference is now possible with `hv_generate_video.py`. For details, please refer to [Inference](#inference).
+
+- Jan 16, 2025
+    - Added a script to merge LoRA weights, `merge_lora.py`. Thanks to kaykyr for PR [#37](https://github.com/kohya-ss/musubi-tuner/pull/37). For details, please refer to [Merging LoRA Weights](#merging-lora-weights).
+    - Changed the sample training settings to a learning rate of 2e-4, `--timestep_sampling` to `shift`, and `--discrete_flow_shift` to 7.0. Faster training is expected. For details, please refer to [Training](#training).
+
 - Jan 14, 2025
     - Added a temporary `--save_merged_model` option to `hv_generate_video.py` to save the DiT model after LoRA merge. For details, please refer to [Inference](#inference).
 
 - Jan 13, 2025
     - Changed the settings for sample image/video generation to address the issue of blurry sample images/videos during training. For details, please refer to [this document](./docs/sampling_during_training.md).
         - You need to set the discrete flow shift and guidance scale correctly during inference, but the training settings were used as they were, causing this issue. We have set default values, which should improve the situation. You can specify the discrete flow shift with `--fs` and the guidance scale with `--g`.
-
-- Jan 12, 2025
-    - Sample image generation during training is now possible. Thanks to NSFW-API. Please refer to [this document](./docs/sampling_during_training.md) for details.
-    - You can now specify the number of repetitions for each dataset. The dataset is repeated the specified number of times, and the training is performed as one epoch. Specify `num_repeats` in the `.toml`. For details, please refer to [this document](./dataset/dataset_config.md).
-    - LoRA now excludes `img_mod` and `txt_mod` of double blocks and `modulation` of single blocks by default. According to reports from the community, this has improved the training results. You can change the target modules by specifying `exclude_patterns` and `include_patterns` with `--network_args`. For details, please refer to [this document](./docs/advanced_config.md). 
-        - If you are resuming training by specifying the previous weights with `--network_weights`, please specify `--network_args "include_patterns=[r'.*(img_mod|txt_mod|modulation).*']"`.
-    - LoRA+ is now available. Specify `loraplus_lr_ratio` in `--network_args`. For details, please refer to [this document](./docs/advanced_config.md).
-
-- Jan 11, 2025
-    - Removed the hash values of the models to be trained (DiT, VAE) from the metadata saved in LoRA. The hash values are almost unused and take time to compute. If you encounter any issues, please let us know.
-    - I have released the weights of the DiT model converted to fp8 [here](https://huggingface.co/kohya-ss/HunyuanVideo-fp8_e4m3fn-unofficial). This can only be used when `--fp8_base` is specified. Download and specify the full path of `mp_rank_00_model_states_fp8.safetensors` to `--dit`. The initialization process at the start of training will be faster.
-
-- Jan 10, 2025
-    - Fixed a bug where `--split_attn` was applied even when not specified.
-    - xformers is now available for training and inference. `--split_attn` is required when using xformers.
-    - Fixed a bug in `flash` mode and confirmed operation. `--split_attn` can now be specified during inference for `flash` mode.
-    - A simple speed comparison during training showed that for training with 1280x720 resolution images, batch size=3, RTX 4090, and Windows 10, the order of speed was `flash` > `flash` + `--split_attn` == `xformers` + `--split_attn` > `sdpa` > `sdpa` + `--split_attn` (`flash` was the fastest).
-        - `sdpa` was about 12% slower than `flash`, and `xformers` + `--split_attn` was about 4% slower than `flash`.
-    - During inference, `flash` >= `sageattn` > `xformers` > `sdpa` (all with `--split_attn`). However, the speed difference between `sdpa` and `flash` is about 10%. Memory usage was almost the same.
-
-- Jan 08, 2025
-    - __Important Update__: Fixed a bug where latents were scaled twice during caching and training. Please re-run `cache_latents.py` (without specifying `--skip_existing`) to re-cache latents.
 
 ### Releases
 
@@ -169,6 +160,8 @@ If you're running low on VRAM, reduce `--vae_spatial_tile_sample_min_size` to ar
 
 Use `--debug_mode image` to display dataset images and captions in a new window, or `--debug_mode console` to display them in the console (requires `ascii-magic`).
 
+By default, cache files not included in the dataset are automatically deleted. You can still keep cache files as before by specifying `--keep_cache`.
+
 ### Text Encoder Output Pre-caching
 
 Text Encoder output pre-caching is required. Create the cache using the following command:
@@ -183,6 +176,8 @@ Adjust `--batch_size` according to your available VRAM.
 
 For systems with limited VRAM (less than ~16GB), use `--fp8_llm` to run the LLM in fp8 mode.
 
+By default, cache files not included in the dataset are automatically deleted. You can still keep cache files as before by specifying `--keep_cache`.
+
 ### Training
 
 Start training using the following command (input as a single line):
@@ -191,13 +186,17 @@ Start training using the following command (input as a single line):
 accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 hv_train_network.py 
     --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt 
     --dataset_config path/to/toml --sdpa --mixed_precision bf16 --fp8_base 
-    --optimizer_type adamw8bit --learning_rate 1e-3 --gradient_checkpointing 
-     --max_data_loader_n_workers 2 --persistent_data_loader_workers 
+    --optimizer_type adamw8bit --learning_rate 2e-4 --gradient_checkpointing 
+    --max_data_loader_n_workers 2 --persistent_data_loader_workers 
     --network_module networks.lora --network_dim 32 
-    --timestep_sampling sigmoid --discrete_flow_shift 1.0 
+    --timestep_sampling shift --discrete_flow_shift 7.0 
     --max_train_epochs 16 --save_every_n_epochs 1 --seed 42
     --output_dir path/to/output_dir --output_name name-of-lora
 ```
+
+__Update__: Changed the sample training settings to a learning rate of 2e-4, `--timestep_sampling` to `shift`, and `--discrete_flow_shift` to 7.0. Faster training is expected. If the details of the image are not learned well, try lowering the discete flow shift to around 3.0.
+
+However, the training settings are still experimental. Appropriate learning rates, training steps, timestep distribution, loss weighting, etc. are not yet known. Feedback is welcome.
 
 For additional options, use `python hv_train_network.py --help` (note that many options are unverified).
 
@@ -211,17 +210,14 @@ Use `--sdpa` for PyTorch's scaled dot product attention. Use `--flash_attn` for 
 
 `--split_attn` processes attention in chunks. Speed may be slightly reduced, but VRAM usage is slightly reduced.
 
-Sample video generation is not yet implemented.
-
 The format of LoRA trained is the same as `sd-scripts`.
 
 `--show_timesteps` can be set to `image` (requires `matplotlib`) or `console` to display timestep distribution and loss weighting during training.
 
 For sample image generation during training, refer to [this document](./docs/sampling_during_training.md). For advanced configuration, refer to [this document](./docs/advanced_config.md).
 
-Appropriate learning rates, training steps, timestep distribution, loss weighting, etc. are not yet known. Feedback is welcome.
-
 ### Merging LoRA Weights
+
 ```bash
 python merge_lora.py \
     --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt \
@@ -230,6 +226,10 @@ python merge_lora.py \
     --device cpu \
     --lora_multiplier 1.0
 ```
+
+Specify the device to perform the calculation (`cpu` or `cuda`, etc.) with `--device`. Calculation will be faster if `cuda` is specified.
+
+Specify the LoRA weights to merge with `--lora_weight` and the multiplier for the LoRA weights with `--lora_multiplier`. Multiple values can be specified, and the number of values must match.
 
 ### Inference
 
@@ -264,7 +264,11 @@ For `--output_type`, specify either `both`, `latent`, `video` or `images`. `both
 
 `--flow_shift` can be specified to shift the timestep (discrete flow shift). The default value when omitted is 7.0, which is the recommended value for 50 inference steps. In the HunyuanVideo paper, 7.0 is recommended for 50 steps, and 17.0 is recommended for less than 20 steps (e.g. 10).
 
-- You can save the DiT model after LoRA merge with the `--save_merged_model` option. Specify `--save_merged_model path/to/merged_model.safetensors`. Note that inference will not be performed when this option is specified.
+By specifying `--video_path`, video2video inference is possible. Specify a video file or a directory containing multiple image files (the image files are sorted by file name and used as frames). An error will occur if the video is shorter than `--video_length`. You can specify the strength with `--strength`. It can be specified from 0 to 1.0, and the larger the value, the greater the change from the original video.
+
+Note that video2video inference is experimental.
+
+You can save the DiT model after LoRA merge with the `--save_merged_model` option. Specify `--save_merged_model path/to/merged_model.safetensors`. Note that inference will not be performed when this option is specified.
 
 ### Convert LoRA to another format
 

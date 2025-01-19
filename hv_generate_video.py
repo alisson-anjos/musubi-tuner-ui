@@ -29,6 +29,7 @@ from modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 from networks import lora
 from utils.model_utils import str_to_dtype
 from utils.safetensors_utils import mem_eff_save_file
+from dataset.image_video_dataset import load_video, glob_images, resize_image_to_bucket
 
 import logging
 
@@ -306,7 +307,24 @@ def encode_input_prompt(prompt, args, device, fp8_llm=False, accelerator=None):
 # endregion
 
 
-def decode_latents(args, latents, device):
+def load_images(image_dir, video_length, bucket_reso):
+    image_files = glob_images(image_dir)
+    if len(image_files) == 0:
+        raise ValueError(f"No image files found in {image_dir}")
+    if len(image_files) < video_length:
+        raise ValueError(f"Number of images in {image_dir} is less than {video_length}")
+
+    image_files.sort()
+    images = []
+    for image_file in image_files[:video_length]:
+        image = Image.open(image_file)
+        image = resize_image_to_bucket(image, bucket_reso)  # returns a numpy array
+        images.append(image)
+
+    return images
+
+
+def prepare_vae(args, device):
     vae_dtype = torch.float16 if args.vae_dtype is None else str_to_dtype(args.vae_dtype)
     vae, _, s_ratio, t_ratio = load_vae(vae_dtype=vae_dtype, device=device, vae_path=args.vae)
     vae.eval()
@@ -317,6 +335,36 @@ def decode_latents(args, latents, device):
     if chunk_size is not None:
         vae.set_chunk_size_for_causal_conv_3d(chunk_size)
         logger.info(f"Set chunk_size to {chunk_size} for CausalConv3d")
+
+    if args.vae_spatial_tile_sample_min_size is not None:
+        vae.enable_spatial_tiling(True)
+        vae.tile_sample_min_size = args.vae_spatial_tile_sample_min_size
+        vae.tile_latent_min_size = args.vae_spatial_tile_sample_min_size // 8
+    # elif args.vae_tiling:
+    else:
+        vae.enable_spatial_tiling(True)
+
+    return vae, vae_dtype
+
+
+def encode_to_latents(args, video, device):
+    vae, vae_dtype = prepare_vae(args, device)
+
+    video = video.to(device=device, dtype=vae_dtype)
+    video = video * 2 - 1
+    with torch.no_grad():
+        latents = vae.encode(video).latent_dist.sample()
+
+    if hasattr(vae.config, "shift_factor") and vae.config.shift_factor:
+        latents = (latents - vae.config.shift_factor) * vae.config.scaling_factor
+    else:
+        latents = latents * vae.config.scaling_factor
+
+    return latents
+
+
+def decode_latents(args, latents, device):
+    vae, vae_dtype = prepare_vae(args, device)
 
     expand_temporal_dim = False
     if len(latents.shape) == 4:
@@ -332,14 +380,7 @@ def decode_latents(args, latents, device):
     else:
         latents = latents / vae.config.scaling_factor
 
-    latents = latents.to(device=device, dtype=vae.dtype)
-    if args.vae_spatial_tile_sample_min_size is not None:
-        vae.enable_spatial_tiling(True)
-        vae.tile_sample_min_size = args.vae_spatial_tile_sample_min_size
-        vae.tile_latent_min_size = args.vae_spatial_tile_sample_min_size // 8
-    # elif args.vae_tiling:
-    else:
-        vae.enable_spatial_tiling(True)
+    latents = latents.to(device=device, dtype=vae_dtype)
     with torch.no_grad():
         image = vae.decode(latents, return_dict=False)[0]
 
@@ -381,6 +422,8 @@ def parse_args():
     parser.add_argument("--save_path", type=str, required=True, help="path to save generated video")
     parser.add_argument("--seed", type=int, default=None, help="Seed for evaluation.")
     parser.add_argument("--embedded_cfg_scale", type=float, default=6.0, help="Embeded classifier free guidance scale.")
+    parser.add_argument("--video_path", type=str, default=None, help="path to video for video2video inference")
+    parser.add_argument("--strength", type=float, default=0.8, help="strength for video2video inference")
 
     # Flow Matching
     parser.add_argument("--flow_shift", type=float, default=7.0, help="Shift factor for flow matching schedulers.")
@@ -479,14 +522,37 @@ def main():
             prompt, args, device, args.fp8_llm, accelerator
         )
 
+        # encode latents for video2video inference
+        video_latents = None
+        if args.video_path is not None:
+            # v2v inference
+            logger.info(f"Video2Video inference: {args.video_path}")
+
+            if os.path.isfile(args.video_path):
+                video = load_video(args.video_path, 0, video_length, bucket_reso=(width, height))  # list of frames
+            else:
+                video = load_images(args.video_path, video_length, bucket_reso=(width, height))  # list of frames
+
+            if len(video) < video_length:
+                raise ValueError(f"Video length is less than {video_length}")
+            video = np.stack(video, axis=0)  # F, H, W, C
+            video = torch.from_numpy(video).permute(3, 0, 1, 2).unsqueeze(0).float()  # 1, C, F, H, W
+            video = video / 255.0
+
+            logger.info(f"Encoding video to latents")
+            video_latents = encode_to_latents(args, video, device)
+            video_latents = video_latents.to(device=device, dtype=dit_dtype)
+
+            clean_memory_on_device(device)
+
         # load DiT model
         blocks_to_swap = args.blocks_to_swap if args.blocks_to_swap else 0
-        loading_device = "cpu" # if blocks_to_swap > 0 else device
+        loading_device = "cpu"  # if blocks_to_swap > 0 else device
 
         logger.info(f"Loading DiT model from {args.dit}")
         if args.attn_mode == "sdpa":
             args.attn_mode = "torch"
-        
+
         # if we use LoRA, weigths should be bf16 instead of fp8, because merging should be done in bf16
         # the model is too large, so we load the model to cpu. in addition, the .pt file is loaded to cpu anyway
         # on the fly merging will be a solution for this issue for .safetenors files
@@ -582,6 +648,20 @@ def main():
             latents.append(randn_tensor(shape_or_frame, generator=generator, device=device, dtype=dit_dtype))
         latents = torch.cat(latents, dim=2)
 
+        if args.video_path is not None:
+            # v2v inference
+            noise = latents
+            assert noise.shape == video_latents.shape, f"noise shape {noise.shape} != video_latents shape {video_latents.shape}"
+
+            num_inference_steps = int(num_inference_steps * args.strength)
+            timestep_start = scheduler.timesteps[-num_inference_steps]  # larger strength, less inference steps and more start time
+            t = timestep_start / 1000.0
+            latents = noise * t + video_latents * (1 - t)
+
+            timesteps = timesteps[-num_inference_steps:]
+
+            logger.info(f"strength: {args.strength}, num_inference_steps: {num_inference_steps}, timestep_start: {timestep_start}")
+
         # FlowMatchDiscreteScheduler does not have init_noise_sigma
 
         # Denoising loop
@@ -602,7 +682,7 @@ def main():
         freqs_cos = freqs_cos.to(device=device, dtype=dit_dtype)
         freqs_sin = freqs_sin.to(device=device, dtype=dit_dtype)
 
-        num_warmup_steps = len(timesteps) - num_inference_steps * scheduler.order
+        num_warmup_steps = len(timesteps) - num_inference_steps * scheduler.order  # this should be 0 in v2v inference
         # with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as p:
         with tqdm(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
